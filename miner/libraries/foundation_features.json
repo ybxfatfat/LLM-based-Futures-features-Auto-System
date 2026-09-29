@@ -1,0 +1,14 @@
+{
+  "Vwap_Deviation": {
+    "name": "Vwap_Deviation",
+    "formula": "(close - vwap) / (vwap + 1e-8)",
+    "description": "最新收盘价相对成交量加权收盘价(VWAP)的偏离比例，经典日内均值回复基准指标。",
+    "field_type": "ratio"
+  },
+  "ts_streak_intensity_decay_5": {
+    "name": "ts_streak_intensity_decay_5",
+    "formula": "TsDecay((DistortLog(MaxConsecBuyVolume / (MaxConsecBuyCount + 1e-8)) - DistortLog(MaxConsecSellVolume / (MaxConsecSellCount + 1e-8))), 5)",
+    "description": "压迫力衰减微观动量。即便用了 DistortLog 降噪，单笔大单压迫力在截面上依然具有一定的跳跃性。通过引入 5 分钟的线性权重衰减（TsDecay），既保留了微观装甲碰撞时的高敏锐度，又赋予了近期连续重击更高的权重，平滑掉了孤立无援的单次随机砸盘。非常适合作为日内高频策略识别微观趋势启动的稳健确认信号。",
+    "field_type": "micro_structure_intensity_ts"
+  }
+}

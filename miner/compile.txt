@@ -1,0 +1,15 @@
+python -m py_compile evolutionary_miner.py
+python -m py_compile evaluator.py
+python -m py_compile manage_libraries.py
+
+
+
+
+
+
+
+
+
+nohup python evolutionary_miner.py > miner_evolution2.log 2>&1 &
+
+nohup python state_miner.py > state_miner.log 2>&1 &

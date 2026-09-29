@@ -1,0 +1,8 @@
+cd ./future_research/tick_to_min_new
+g++ -O3 -Wall -shared -std=c++11 -fPIC $(python3 -m pybind11 --includes) tick_engine.cpp -o tick_engine$(python3-config --extension-suffix)
+
+
+nohup python ./future_research/tick_to_min_new/run.py > run.log 2>&1 &
+
+
+nohup python ./future_research/features/feature_generate.py > run.log 2>&1 &

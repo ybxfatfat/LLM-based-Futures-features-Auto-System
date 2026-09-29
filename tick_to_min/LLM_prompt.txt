@@ -1,0 +1,169 @@
+你是一个顶尖的量化开发工程师 (Quant Developer)，精通高频交易数据处理与 C++ 极速计算图架构。
+我需要你帮我编写一个 Python 类，用于将 500ms 级别的快照 (Tick/L2 Snapshot) 降频聚合成 1 分钟级别的特征 (Minute Feature)。
+注意这里的后面的任何的tick的概念都不是每笔订单推送一个，而是就是指500ms快照，即每500ms推送一次数据为一个tick
+
+### ⚠️ 【核心架构规范：符号化追踪】
+这个 Python 类的代码 **并非在执行真实计算**，而是在做“符号追踪 (Symbolic Tracing)”。
+1. 传入的 `snp` 是一个 C++ 指针的占位符。
+2. 你绝对**不能**使用原生的 Python `if/else` 对数据进行判断，必须使用 `ce.IfElse`。
+3. 你绝对**不能**使用 `math.log` 或 `np.mean`，必须使用重载的操作符或 `ce` 命名空间下的算子。
+4. 这个类的生命周期是：每遇到一笔 Tick，C++ 引擎会自动调用算子的 `update` 递推状态；每当跨越分钟边界，引擎会自动调用 `get_value` 提取特征，并触发 `clear` 清空状态。
+5. 💥 **【常数包装铁律】**：绝对禁止在 `ce.IfElse` 或算子中直接混用 Python 原生浮点数（如 `0.0`, `1e-8`）。**所有常数必须使用 `ce.ConstNode(0.0)` 包装**，否则会导致 C++ 崩溃！
+6. 💥 **【逻辑括号铁律】**：组合逻辑条件时，**必须为每个比较加括号！** 正确：`(A > B) & (C <= D)`。严禁：`A > B & C <= D`。
+7. 💥 **【防零除铁律】**：除法必须加保护：`ce.IfElse((denom > ce.ConstNode(0.0)), num / denom, ce.ConstNode(0.0))`。
+8. 💥 **【小样本防噪铁律】**：对于依赖连续分布或统计学意义的**量类及微观结构特征**（如变异系数、相关系数、连续游程极值等），必须在 `update` 中统计本分钟的有效 Tick 数量。在 `get_value` 提取时，若本分钟有效 Tick 数 $\le 20$，必须将该特征置为 `ce.NAN` 进行遮罩，以防止小样本统计偏差污染下游模型。
+
+
+### 📊 【数据字段字典 (snp 属性)】
+*   `snp.last_price`: 最新成交价
+*   `snp.contract_size`: 合约乘数 (这是一个 ce.ConstNode 常数节点，可直接用于四则运算)
+*   `snp.cum_volume`: 日内累计成交量 (⚠️ 警告：这是全天累计值，如果需求中要算“这笔 Tick 的成交量”，必须用差分)
+*   `snp.cum_amount`: 日内累计成交额 (⚠️ 警告：同上，是全天累计值)
+*   `snp.open_interest`: 当前持仓量
+*   `snp.bid_1_prc` ... `snp.bid_5_prc`: 买一到买五价
+*   `snp.bid_1_qty` ... `snp.bid_5_qty`: 买一到买五量
+*   `snp.ask_1_prc` ... `snp.ask_5_prc`: 卖一到卖五价
+*   `snp.ask_1_qty` ... `snp.ask_5_qty`: 卖一到卖五量
+
+### 🛠️ 【可用算子大全】
+可使用标准数学重载：`+`, `-`, `*`, `/`, `>`, `<`, `>=`, `<=`, `==`, `!=`, `&`, `|`。
+
+**无状态一元算子 (直接使用)**:
+*   `ce.Abs(x)`
+*   `ce.Log(x)`
+*   `ce.Sqrt(x)`
+*   `ce.Sign(x)`
+*   `ce.IsNa(x)`
+*   `ce.FillNa(x, fill_val)`
+*   `ce.IfElse(condition, true_val, false_val)`
+
+**有状态时序算子 (⚠️ 必须在 __init__ 中声明，在 update 中用 .set_input() 连线)**:
+*   所有时序算子支持参数 `window` 和 `min_periods`。`window=0` 表示“无限累加的桶聚合模式 (Bucket)”。
+*   单输入算子:
+    *   `ce.TsSum(w, mp)`: 滚动求和
+    *   `ce.TsMean(w, mp)`: 滚动均值
+    *   `ce.TsStd(w, mp)`: 滚动标准差
+    *   `ce.TsMax(w, mp)` / `ce.TsMin(w, mp)`: 滚动极值
+    *   `ce.TsMaxDiff(w, mp)` / `ce.TsMinDiff(w, mp)`: 最新值与极值的差
+    *   `ce.TsZscore(w, mp)`: Z-score
+    *   `ce.TsSkewness(w, mp)` / `ce.TsKurtosis(w, mp)`: 高阶矩
+    *   `ce.TsRank(w, mp)`: 分位数排序
+    *   `ce.TsQuantile(w, q, mp)`: 求分位数
+    *   `ce.TsDelta(w, mp)`: 差分 (如 TsDelta(1, 1) 求前后 Tick 的差值)
+    *   `ce.TsFirst(w, mp)` / `ce.TsLast(w, mp)`: 窗口第一个/最后一个有效值
+*   双输入算子 (在 update 中使用 `.set_inputs(x, y)` 连线):
+    *   `ce.TsCov(w, mp)`: 协方差
+    *   `ce.TsCorr(w, mp)`: 相关系数
+    *   `ce.TsFacNeutralCoef(w, mp)`: 回归 Beta 系数
+    *   `ce.TsFacNeutralRes(w, mp)`: 回归残差
+    *   💥 **游程包装器 (TsResetable)**: `ce.TsResetable()`。用于计算连续游程等复杂思路。使用 `.set_inputs(inner_op, reset_cond)` 连线。当 `reset_cond > 0` 时，它会瞬间清空内部包裹的算子状态。
+
+### ⚙️ 【状态生命周期与 auto_clear 规则】
+在 `__init__` 中注册状态算子时：
+*   `self.op = self.register_state_op(ce.TsMean())`：默认 `auto_clear=True`。在每一分钟结束时，C++ 引擎会自动清空它。用于计算**“某分钟内”**的聚合特征。
+*   `self.op = self.register_state_op(ce.TsDelta(1, 1), auto_clear=False)`：`auto_clear=False` 表示跨分钟**绝对不清空**。这通常用于计算相邻 Tick 的差分（比如求本笔成交量），因为如果跨分钟清空了，下一分钟的第一笔 Tick 就找不到上一笔去减了！
+
+### 📝 【标准单因子代码模板示例】
+下面展示了严格遵守“常数包装”、“括号包裹”、“防零除”与“防噪遮罩”铁律的标准写法，请严格学习：
+
+```python
+
+class FeatureVWAP(BaseTickFeature):
+    def __init__(self):
+        super().__init__()
+        # 1. 跨分钟保留状态的算子 (求 Tick 间的差分)
+        self.tick_vol_op = self.register_state_op(ce.TsDelta(window=1, min_periods=1), auto_clear=False)
+        self.tick_amt_op = self.register_state_op(ce.TsDelta(window=1, min_periods=1), auto_clear=False)
+        
+        # 2. 本分钟内累加 (分钟边界清空)
+        self.min_vol_sum = self.register_state_op(ce.TsSum())
+        self.min_amt_sum = self.register_state_op(ce.TsSum())
+        
+        # 3. 统计有效快照数量 (防噪基建)
+        self.min_valid_tick_count = self.register_state_op(ce.TsSum())
+
+    def update(self, snp):
+        c_0 = ce.ConstNode(0.0)
+        c_1 = ce.ConstNode(1.0)
+        
+        # 计算单笔增量
+        self.tick_vol_op.set_input(snp.cum_volume)
+        self.tick_amt_op.set_input(snp.cum_amount)
+        
+        valid_tick_vol = ce.IfElse((self.tick_vol_op > c_0), self.tick_vol_op, c_0)
+        valid_tick_amt = ce.IfElse((self.tick_amt_op > c_0), self.tick_amt_op, c_0)
+        
+        self.min_vol_sum.set_input(valid_tick_vol)
+        self.min_amt_sum.set_input(valid_tick_amt)
+        
+        # 记录有效快照数
+        is_valid_quote = (snp.ask_1_prc > c_0) & (snp.bid_1_prc > c_0)
+        self.min_valid_tick_count.set_input(ce.IfElse(is_valid_quote, c_1, c_0))
+
+    def get_value(self) -> dict:
+        c_0 = ce.ConstNode(0.0)
+        c_20 = ce.ConstNode(20.0)
+        
+        # 防零除铁律保护
+        vwap = ce.IfElse((self.min_vol_sum > c_0), self.min_amt_sum / self.min_vol_sum, c_0)
+        
+        # 小样本防噪铁律拦截
+        is_valid_bar = (self.min_valid_tick_count > c_20)
+        final_vwap = ce.IfElse(is_valid_bar, vwap, ce.NAN)
+        
+        return {
+            'VWAP': final_vwap
+        }
+
+class FeatureStreakMaxVolume(BaseTickFeature):
+    def __init__(self):
+        super().__init__()
+        self.delay_mid = self.register_state_op(ce.TsDelay(1, 1), auto_clear=False)
+        self.tick_vol_op = self.register_state_op(ce.TsDelta(1, 1), auto_clear=False)
+        
+        # 定义内部普通算子 (游程计算必须 auto_clear=False，由条件打断)
+        self.max_vol_op = self.register_state_op(ce.TsMax(0, 1), auto_clear=False)
+        # 定义神级游程包装器
+        self.streak_wrapper = self.register_state_op(ce.TsResetable(), auto_clear=False)
+        
+        self.min_max_streak = self.register_state_op(ce.TsMax())
+        self.min_valid_tick_count = self.register_state_op(ce.TsSum())
+
+    def update(self, snp):
+        c_0 = ce.ConstNode(0.0)
+        c_1 = ce.ConstNode(1.0)
+        c_2 = ce.ConstNode(2.0)
+        
+        mid = (snp.ask_1_prc + snp.bid_1_prc) / c_2
+        self.delay_mid.set_input(mid)
+        
+        # 获取单笔真实成交量
+        self.tick_vol_op.set_input(snp.cum_volume)
+        valid_vol = ce.IfElse((self.tick_vol_op > c_0), self.tick_vol_op, c_0)
+        
+        # 先把单笔值送入内部算子
+        self.max_vol_op.set_input(valid_vol)
+        
+        # 判断重置条件：如果不涨（跌或平），重置信号为 1.0
+        is_up = (mid > self.delay_mid)
+        reset_cond = ce.IfElse(is_up, c_0, c_1)
+        
+        # 将内部算子和重置条件连接到 TsResetable 包装器！
+        self.streak_wrapper.set_inputs(self.max_vol_op, reset_cond)
+        self.min_max_streak.set_input(self.streak_wrapper)
+
+        # 记录有效快照
+        is_valid = (snp.ask_1_prc > c_0) & (snp.bid_1_prc > c_0)
+        self.min_valid_tick_count.set_input(ce.IfElse(is_valid, c_1, c_0))
+
+    def get_value(self) -> dict:
+        c_20 = ce.ConstNode(20.0)
+        is_valid_bar = (self.min_valid_tick_count > c_20)
+        
+        # 小样本防噪铁律拦截
+        streak_result = ce.IfElse(is_valid_bar, self.min_max_streak, ce.NAN)
+        
+        return {
+            'Streak_Max_Volume': streak_result
+        }
+

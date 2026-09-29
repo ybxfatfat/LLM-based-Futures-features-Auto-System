@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM-GA Architecture (High-Density Academic Version)</title>
+    <style>
+        /* 学术级极简与高密度排版风格 */
+        body {
+            background-color: #e5e5e5; /* 方便看清白色画板边缘 */
+            font-family: "Times New Roman", Times, serif;
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            justify-content: center;
+        }
+        /* 核心画板：固定 1000px 宽度，完美契合截图与 A4 纸比例 */
+        .diagram-wrapper { 
+            width: 1000px; 
+            background: #ffffff; 
+            padding: 30px 40px; 
+            border: 1px solid #000; 
+            box-sizing: border-box; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        /* 顶部裁判与铁律库 */
+        .header-box { 
+            border: 2px solid #b7950b; 
+            background: #fcf3cf; 
+            padding: 12px; 
+            text-align: center; 
+            margin-bottom: 20px; 
+        }
+        .header-box b { font-size: 16px; display: block; margin-bottom: 5px; }
+        .header-box span { font-size: 13px; color: #333; }
+
+        /* 3列网格布局：左(库) - 中(主轴) - 右(名人堂) */
+        .grid { 
+            display: grid; 
+            grid-template-columns: 210px 450px 210px; 
+            gap: 0 25px; 
+        }
+
+        /* 节点框通用样式 */
+        .box { 
+            border: 1.5px solid #000; 
+            padding: 12px 15px; 
+            background: #fff; 
+            border-radius: 4px; 
+            font-size: 13px; 
+            line-height: 1.35; 
+            position: relative; 
+            box-shadow: 2px 2px 0px rgba(0,0,0,0.1);
+        }
+        .box b { font-size: 14.5px; display: block; margin-bottom: 5px; color: #000;}
+        .box span { color: #444; }
+
+        /* 垂直数据流向管道 (包含 E&E 机制) */
+        .pool-arrow { 
+            text-align: center; 
+            font-size: 12.5px; 
+            font-style: italic; 
+            font-weight: bold;
+            color: #333; 
+            padding: 6px 0; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            background: #f8f9fa;
+            border-left: 1.5px dashed #888;
+            border-right: 1.5px dashed #888;
+            width: 80%;
+            margin: 0 auto;
+        }
+        .pool-arrow::after { 
+            content: '▼'; 
+            font-size: 12px; 
+            line-height: 1; 
+            margin-top: 2px; 
+            color: #000;
+        }
+
+        /* 网格坐标定位 */
+        .g-l1 { grid-column: 2; grid-row: 1; }
+        .g-a1 { grid-column: 2; grid-row: 2; }
+        .g-l2 { grid-column: 2; grid-row: 3; }
+        .g-a2 { grid-column: 2; grid-row: 4; }
+        .g-l3 { grid-column: 2; grid-row: 5; }
+        .g-a3 { grid-column: 2; grid-row: 6; }
+        .g-l4 { grid-column: 2; grid-row: 7; }
+        .g-a4 { grid-column: 2; grid-row: 8; }
+        .g-l5 { grid-column: 2; grid-row: 9; }
+        .g-a5 { grid-column: 2; grid-row: 10; border-left:none; border-right:none; background:transparent;}
+        .g-end { grid-column: 2; grid-row: 11; border: 2px dashed #000; background: #e9ecef; border-radius: 8px; text-align:center; box-shadow: none;}
+
+        /* 左侧辅助库 */
+        .g-base { grid-column: 1; grid-row: 1; align-self: center; border: 1.5px dotted #196f3d; background: #f0f7f4; box-shadow: none;}
+        .g-comp { grid-column: 1; grid-row: 7; align-self: center; border: 1.5px dotted #196f3d; background: #f0f7f4; box-shadow: none;}
+
+        /* 右侧名人堂 (跨越L1到L5) */
+        .g-hof { 
+            grid-column: 3; 
+            grid-row: 1 / span 9; 
+            border: 2px solid #2874a6; 
+            background: #eaf2f8; 
+            display: flex; 
+            flex-direction: column; 
+            justify-content: center; 
+            text-align: center; 
+            box-shadow: none;
+        }
+
+        /* 水平连接箭头 (从左到中) */
+        .arrow-left-to-center { 
+            position: absolute; right: -27px; top: 50%; transform: translateY(-50%); font-size: 18px; color: #196f3d; font-weight: bold;
+        }
+        .arrow-left-to-center::after { content: '→'; }
+
+        /* 水平连接箭头 (从中到右) */
+        .arrow-center-to-right { 
+            position: absolute; right: -27px; top: 50%; transform: translateY(-50%); font-size: 18px; color: #2874a6; font-weight: bold;
+        }
+        .arrow-center-to-right::after { content: '→'; }
+        .pass-text { position: absolute; right: -55px; top: 10px; font-size: 10px; font-style: italic; color: #2874a6; width: 60px; line-height: 1;}
+
+        /* L4 专属：深度嵌套递归环 */
+        .nesting-loop { 
+            position: absolute; left: -12px; top: 15%; height: 70%; width: 12px; 
+            border-top: 1.5px solid #000; border-left: 1.5px solid #000; border-bottom: 1.5px solid #000; 
+        }
+        .nesting-loop::after { content: '▲'; position: absolute; top: -6px; right: -5px; font-size: 9px; }
+        .nesting-text { position: absolute; left: -85px; top: 35%; font-size: 11px; font-style: italic; font-weight: bold; color: #000; }
+
+        /* 图注说明 */
+        .caption { 
+            margin-top: 30px; 
+            border-top: 1.5px solid #000; 
+            padding-top: 15px; 
+            font-size: 13.5px; 
+            text-align: justify; 
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 1000px 截屏专用画板容器 -->
+    <div class="diagram-wrapper">
+        
+        <!-- ================= 全局裁判 ================= -->
+        <div class="header-box">
+            <b>Global Knowledge Bank & LLM-As-A-Judge</b>
+            <span>Injects Domain Axioms (quant rules) to ALL Prompts to prevent logic/data leakage.<br/>Acts as a ruthless Judge to prune ANY Pool exceeding 100 capacity (Homogeneity penalty).</span>
+        </div>
+
+        <div class="grid">
+            <!-- Row 1: Layer 1 -->
+            <div class="box g-base">
+                <b style="color:#196f3d;">Base Features Lib</b><br><span>(Inspiration Templates)</span>
+                <div class="arrow-left-to-center"></div>
+            </div>
+            <div class="box g-l1">
+                <b>Layer 1: Meaningful Base Constructs</b><br>
+                <span>Forces LLM to combine raw variables or injected templates into novel constructs with strict micro-structural physical meaning.</span>
+                <div class="arrow-center-to-right"></div><div class="pass-text">Pass Abs<br>Threshold</div>
+            </div>
+            <div class="box g-hof">
+                <b style="color:#2874a6; font-size: 16px;">🌟 Alpha<br>Hall of Fame</b><br>
+                <span style="font-style:italic; font-weight:bold; color:#333;">(Async Extraction)</span><br><br>
+                <span style="font-size:12px; line-height: 1.4;">Continuously extracts high-SNR candidates across any layer for downstream Deep Learning integration (DL Roots).</span>
+            </div>
+
+            <!-- Row 2: E&E Pipeline 1->2 -->
+            <div class="pool-arrow g-a1">E&E Batch: Exploit L1 + Explore History</div>
+
+            <!-- Row 3: Layer 2 -->
+            <div class="box g-l2">
+                <b>Layer 2: Logic-Driven Relativization</b><br>
+                <span>Context-aware normalization. Uses physical logic to strip absolute scale and volume differences for cross-sectional comparability.</span>
+                <div class="arrow-center-to-right"></div><div class="pass-text">Pass Abs<br>Threshold</div>
+            </div>
+
+            <!-- Row 4: E&E Pipeline 2->3 -->
+            <div class="pool-arrow g-a2">E&E Batch: Exploit L2 + Explore History</div>
+
+            <!-- Row 5: Layer 3 -->
+            <div class="box g-l3">
+                <b>Layer 3: Monotonicity Calibration</b><br>
+                <span>Simulates visual diagnosis using 10-quantile future return profiles. Forces mathematical operators to fix U-shapes and restore strict monotonicity.</span>
+                <div class="arrow-center-to-right"></div><div class="pass-text">Pass Abs<br>Threshold</div>
+            </div>
+
+            <!-- Row 6: E&E Pipeline 3->4 -->
+            <div class="pool-arrow g-a3">E&E Batch: Exploit L3 + Explore History</div>
+
+            <!-- Row 7: Layer 4 -->
+            <div class="box g-comp">
+                <b style="color:#196f3d;">Compound Ops Lib</b><br><span>(Dropout Sampling)</span>
+                <div class="arrow-left-to-center"></div>
+            </div>
+            <div class="box g-l4">
+                <div class="nesting-loop"><div class="nesting-text">Max 3 Loops<br/>(Nesting)</div></div>
+                <b>Layer 4: Temporal Interaction & Nesting</b><br>
+                <span>The Deep-Water Zone. Injects novel compound operators to inspire deep momentum/reversal extraction. Mandates monotonic deficiency attribution.</span>
+                <div class="arrow-center-to-right"></div><div class="pass-text">Pass Abs<br>Threshold</div>
+            </div>
+
+            <!-- Row 8: E&E Pipeline 4->5 -->
+            <div class="pool-arrow g-a4">E&E Batch: Exploit L4 + Explore History</div>
+
+            <!-- Row 9: Layer 5 -->
+            <div class="box g-l5">
+                <b>Layer 5: Polish & Window Sweeping</b><br>
+                <span>Final noise smoothing + Forced grid search generating 5-8 parameter window variants to probe survival boundaries across time scales.</span>
+                <div class="arrow-center-to-right"></div><div class="pass-text">Pass Abs<br>Threshold</div>
+            </div>
+
+            <!-- Row 10: Terminal -->
+            <div class="pool-arrow g-a5" style="border:none;">▼ Terminal Survivors ▼</div>
+
+            <!-- Row 11: 闭环回库 -->
+            <div class="box g-end">
+                <b>Active Pool (Round Terminal Buffer)</b><br>
+                <span style="color: #b35900; font-weight:bold; font-size: 14px;">⟲ Lifelong Learning: Logs Keepers to Knowledge Bank & Initializes Next Epoch</span>
+            </div>
+        </div>
+
+        <!-- ================= 论文图注 ================= -->
+        <div class="caption">
+            <b>Figure 1: The LLM-GA Evolutionary Harness Architecture.</b> The system orchestrates a 5-layer targeted mutation pipeline to tightly govern LLM feature discovery. <b>Left Auxiliary:</b> Foundation and Compound libraries inspire meaningful physical constructs (L1) and novel temporal interactions (L4). <b>Central Axis:</b> Exploration-Exploitation (E&E) Batches, serving as inter-layer reservoirs, perfectly balance genetic diversity by merging freshly generated layer-outputs (Exploit) with randomly sampled dormant genes (Explore). Layer 4 uniquely incorporates a recursive nesting mechanism to maximize kinetic extraction. <b>Top/Bottom/Right Auxiliaries:</b> A global Knowledge Bank (LLM-Judge) prunes overgrown pools and receives feedback from the terminal Active Pool to enable lifelong learning. Simultaneously, an asynchronous <i>Alpha Hall of Fame</i> continuously extracts high-SNR candidates across all layers.
+        </div>
+
+    </div>
+
+</body>
+</html>

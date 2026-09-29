@@ -1,0 +1,452 @@
+[
+  {
+    "name": "ob_depth_decay_rank",
+    "layer_found": 2,
+    "formula": "TsRank(TsDecay((bid1 - ask1) / (bid1 + ask1 + 0.00000001), 10), 120)",
+    "rationale": "Applies a robust percentile ranking over a 120-minute window to the decayed OIR. This strips away baseline differences in order book thickness between different assets, outputting a pure relative strength signal of buying vs selling pressure.",
+    "ir": -6.684305140698665,
+    "full_ic": 0.00139624411283515,
+    "mean_ic": -0.024311611948080264,
+    "discovery_time": "2026-09-01T11:10:34.057476"
+  },
+  {
+    "name": "bursty_vol_price_corr",
+    "layer_found": 4,
+    "formula": "TsCorr(TsMean(TsRank(VolIncrementCV * (volume / (TsMean(volume, 20) + 0.00000001)), 120), 15), TsPct(close, 15), 60)",
+    "rationale": "The original 20-bin return shows a very weak amplitude (0.4 bps) and lacks clear monotonicity, indicating the raw volume shock decays too fast or contains false breakouts. By calculating its rolling correlation with 15-min price returns, we extract the conditional momentum where volume shocks consistently align with price trends, filtering out noise in the middle bins.",
+    "ir": -5.509781800397772,
+    "full_ic": -0.0002349750441123298,
+    "mean_ic": -0.023384731269893738,
+    "discovery_time": "2026-09-01T15:59:48.289217"
+  },
+  {
+    "name": "smart_money_flow_vol_corr",
+    "layer_found": 4,
+    "formula": "TsCorr(TsDecay(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 15), volume, 60)",
+    "rationale": "The 20-bin return is virtually flat (0.0 to 0.1 bps) with low amplitude, meaning the base decay signal lacks directional edge. By using TsCorr with volume, we measure if the smart money flow is expanding alongside volume. High correlation indicates strong conviction, translating a flat signal into a sharp monotonic momentum indicator with increased tail amplitude.",
+    "ir": -5.157149685459453,
+    "full_ic": -0.0034922663012508853,
+    "mean_ic": -0.02284191032875121,
+    "discovery_time": "2026-09-01T04:40:14.859577"
+  },
+  {
+    "name": "path_efficient_trend",
+    "layer_found": 1,
+    "formula": "Abs(TsDelta(vwap, 15)) / (TsSum(Abs(TsDelta(vwap, 1)), 15) + 0.00000001) * Sign(vwap - EWMA(vwap, 20))",
+    "rationale": "如果典型价格偏离呈现正向，且路径效率极高（单边推土机），则确认主升浪；否则为震荡。",
+    "ir": -5.1298539977898745,
+    "full_ic": 0.003350718862666451,
+    "mean_ic": -0.02082096072026667,
+    "discovery_time": "2026-09-01T13:00:28.804807"
+  },
+  {
+    "name": "path_eff_trend_decay",
+    "layer_found": 2,
+    "formula": "TsDecay(Abs(TsDelta(vwap, 15)) / (TsSum(Abs(TsDelta(vwap, 1)), 15) + 0.00000001) * Sign(vwap - EWMA(vwap, 20)), 15)",
+    "rationale": "利用线性权重衰减移动平均对推土机趋势进行平滑，同时保留近期信号的较高权重，提升截面比较时的稳定性。",
+    "ir": -5.073130387424316,
+    "full_ic": 0.0053311433485486006,
+    "mean_ic": -0.023762687427773068,
+    "discovery_time": "2026-09-01T13:04:38.629801"
+  },
+  {
+    "name": "sm_vol_trend_vol_corr",
+    "layer_found": 4,
+    "formula": "TsCorr(DistortSqrt(TsZscore(TsSum(TsDelta(close, 1) * volume, 10) / (TsSum(volume, 10) + 0.00000001), 60)), volume, 60)",
+    "rationale": "The original feature exhibits a relatively weak left tail (-0.1 bps) and a volatile right tail (fluctuating between +0.4 and -0.2). The amplitude is only about 0.5 bps. By calculating the rolling correlation between the feature and volume, we aim to isolate periods where smart money trends are strongly backed by volume expansion, which should suppress the right-tail noise and steepen the monotonicity.",
+    "ir": -4.771718105364818,
+    "full_ic": 0.004534331780793748,
+    "mean_ic": -0.02116356837191158,
+    "discovery_time": "2026-09-01T07:58:46.896914"
+  },
+  {
+    "name": "smart_money_vol_divergence",
+    "layer_found": 4,
+    "formula": "TsCorr(TsDelta(DistortLog(TsZscore(TsSum(TsDelta(close, 1) * volume, 10) / (TsSum(volume, 10) + 0.00000001), 60)), 3), TsDelta(volume, 3), 60)",
+    "rationale": "Smart money signal has a downward trend but noisy tails. Cross-correlating its changes with volume changes (Volume_Price_Divergence_Trend) detects hidden accumulation/distribution, creating a powerful reversal indicator with amplified tail returns.",
+    "ir": -4.636048686722028,
+    "full_ic": 0.005020872691078154,
+    "mean_ic": -0.02084950672094265,
+    "discovery_time": "2026-09-01T06:43:10.984912"
+  },
+  {
+    "name": "inst_buy_streak_vol_weighted",
+    "layer_found": 2,
+    "formula": "TsMean(MoreThan(TsDelta(MaxConsecBuyVolume, 1), 0), 15) * (TsMean(TsPct(close, 5), 30) / (TsStd(TsPct(close, 5), 30) + 0.00000001))",
+    "rationale": "Weights the buy streak consistency with the trend's information ratio to ensure the underlying price action is also steadily moving up.",
+    "ir": -3.6652858860949884,
+    "full_ic": 0.008240381629855967,
+    "mean_ic": -0.01700404084649864,
+    "discovery_time": "2026-09-01T18:50:44.171909"
+  },
+  {
+    "name": "trd_path_eff_amp_vwap_cov",
+    "layer_found": 4,
+    "formula": "TsCov(Sign(TsZscore(Abs(TsDelta(close_trd, 10)) / (TsSum(Abs(TsDelta(close_trd, 1)), 10) + 0.00000001), 60)) * (TsZscore(Abs(TsDelta(close_trd, 10)) / (TsSum(Abs(TsDelta(close_trd, 1)), 10) + 0.00000001), 60) * TsZscore(Abs(TsDelta(close_trd, 10)) / (TsSum(Abs(TsDelta(close_trd, 1)), 10) + 0.00000001), 60)), TsPct(vwap, 10), 60)",
+    "rationale": "The amplified path efficiency penalizes noise, but its amplitude might still be insufficient. By taking its covariance with VWAP returns, we create an interaction feature that rewards high path efficiency only when it is aligned with significant price moves, widening the spread between extreme deciles.",
+    "ir": -3.5825643039655963,
+    "full_ic": 0.004634648471501488,
+    "mean_ic": -0.0201677063126325,
+    "discovery_time": "2026-09-01T07:24:26.694764"
+  },
+  {
+    "name": "vol_weighted_deep_obi",
+    "layer_found": 1,
+    "formula": "TsSum(ExpOBI * volume / (TsMean(volume, 60) + 0.00000001), 10) / (TsSum(volume / (TsMean(volume, 60) + 0.00000001), 10) + 0.00000001)",
+    "rationale": "Smooths the deep order book imbalance (ExpOBI) using relative volume as the weight. This effectively suppresses spoofing noise during low-volume periods and reveals true structural pressure when actual trading activity surges.",
+    "ir": 3.500223336927118,
+    "full_ic": -0.009724245077986452,
+    "mean_ic": 0.011255734902955573,
+    "discovery_time": "2026-09-01T12:45:50.899033"
+  },
+  {
+    "name": "vol_weighted_exp_obi",
+    "layer_found": 1,
+    "formula": "TsSum(ExpOBI * volume, 15) / (TsSum(volume, 15) + 0.00000001)",
+    "rationale": "Order book imbalance (ExpOBI) can be easily manipulated by spoofing. By weighting it with actual trading volume, we filter out static mirages. A strong signal here means the deep limit order imbalance is actively supported by real trading activity.",
+    "ir": 3.4933161286491132,
+    "full_ic": -0.010567182036723528,
+    "mean_ic": 0.011988152451363114,
+    "discovery_time": "2026-09-02T04:12:01.387166"
+  },
+  {
+    "name": "volume_weighted_obi",
+    "layer_found": 1,
+    "formula": "TsSum(ExpOBI * volume, 10) / (TsSum(volume, 10) + 0.00000001)",
+    "rationale": "Order book imbalance is more meaningful when backed by actual trading volume. Rolling weighted signal strength filters out OBI noise during illiquid periods.",
+    "ir": 3.4702960441865454,
+    "full_ic": -0.009810352568639977,
+    "mean_ic": 0.011137543961103072,
+    "discovery_time": "2026-09-01T02:54:42.793313"
+  },
+  {
+    "name": "liq_sqz_auto_corr_vw_dir_adj",
+    "layer_found": 5,
+    "formula": "TsSum(TsCorr(EWMA(TsMedian(TsStd(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) / (TsMad(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) + 0.00000001), 30), 10) - EWMA(TsMedian(TsStd(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) / (TsMad(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) + 0.00000001), 30), 30), TsDelay(EWMA(TsMedian(TsStd(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) / (TsMad(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) + 0.00000001), 30), 10) - EWMA(TsMedian(TsStd(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) / (TsMad(ask1 - bid1 - TsDecay(ask1 - bid1, 10), 30) + 0.00000001), 30), 30), 5), 30) * volume, 30) / (TsSum(volume, 30) + 0.00000001) * TsIr(TsDelta(close, 1), 30)",
+    "rationale": "The squeeze auto-correlation lacks directional amplitude because it purely measures momentum inertia. Multiplying it by the Information Ratio of price returns injects a strong directional bias, turning the squeeze into a directional breakout signal.",
+    "ir": -3.4056726460481035,
+    "full_ic": 0.008650129033548096,
+    "mean_ic": -0.01583395986269318,
+    "discovery_time": "2026-09-01T15:08:18.972164"
+  },
+  {
+    "name": "weighted_obi_buy_ratio",
+    "layer_found": 1,
+    "formula": "TsSum(ExpOBI * volume, 10) / (TsSum(volume, 10) + 0.00000001) * BuyRatio",
+    "rationale": "Combines the static order book imbalance (ExpOBI) smoothed by volume with the dynamic market order aggressiveness (BuyRatio). A strong signal here means both passive limit orders and active market orders are aligned in the same direction.",
+    "ir": 3.3602020688784946,
+    "full_ic": -0.00955005051892291,
+    "mean_ic": 0.010557614567175315,
+    "discovery_time": "2026-09-02T03:39:07.280615"
+  },
+  {
+    "name": "stochastic_obi_autocorr_ewma",
+    "layer_found": 3,
+    "formula": "EWMA(TsCorr((ExpOBI - TsMin(ExpOBI, 15)) / (TsMax(ExpOBI, 15) - TsMin(ExpOBI, 15) + 0.00000001), TsDelay((ExpOBI - TsMin(ExpOBI, 15)) / (TsMax(ExpOBI, 15) - TsMin(ExpOBI, 15) + 0.00000001), 1), 30), 10)",
+    "rationale": "The original feature has an excellent, highly monotonic return profile. A simple EWMA smoothing preserves this alpha while reducing tick-level noise.",
+    "ir": -3.1268959182088087,
+    "full_ic": -0.013627345178783007,
+    "mean_ic": -0.011709105746845815,
+    "discovery_time": "2026-09-01T17:24:57.320042"
+  },
+  {
+    "name": "stochastic_obi_autocorr",
+    "layer_found": 2,
+    "formula": "TsCorr((ExpOBI - TsMin(ExpOBI, 15)) / (TsMax(ExpOBI, 15) - TsMin(ExpOBI, 15) + 0.00000001), TsDelay((ExpOBI - TsMin(ExpOBI, 15)) / (TsMax(ExpOBI, 15) - TsMin(ExpOBI, 15) + 0.00000001), 1), 30)",
+    "rationale": "Measure the 30-minute rolling auto-correlation of the stochastic OBI depth to gauge the persistence and self-reinforcing nature of the limit order book pressure.",
+    "ir": -2.813352660772183,
+    "full_ic": -0.010910164533877761,
+    "mean_ic": -0.009347812110896,
+    "discovery_time": "2026-09-01T09:03:01.401604"
+  },
+  {
+    "name": "trd_snapshot_div_accel_weighted",
+    "layer_found": 4,
+    "formula": "TsSum(TsDelta(EWMA(TsDelta(TsRank(Abs((TsLast(IfElse(IsNa(close_trd), 0.0, (close_trd - close) / (close + 0.00000001)), 60) - TsFirst(IfElse(IsNa(close_trd), 0.0, (close_trd - close) / (close + 0.00000001)), 60)) / (TsStd(TsDelta(IfElse(IsNa(close_trd), 0.0, (close_trd - close) / (close + 0.00000001)), 1), 60) * 7.745966692414834 + 0.00000001)), 60), 1), 10), 30) * tick_count, 60) / (TsSum(tick_count, 60) + 0.00000001)",
+    "rationale": "Divergence acceleration is entirely flat (IR -0.332). Using Weighted_Signal_Strength weighted by tick_count ensures that the acceleration is happening during periods of high trading activity. This filters out spurious accelerations in illiquid times, steepening the monotonic trend by passing only high-conviction signals to the extremes.",
+    "ir": -2.709178684911223,
+    "full_ic": -0.008211443450564794,
+    "mean_ic": -0.007583685003597216,
+    "discovery_time": "2026-09-01T04:45:55.835169"
+  },
+  {
+    "name": "smf_idio_mom_autocorr_vol_adj",
+    "layer_found": 5,
+    "formula": "(TsLast(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 60) - TsFirst(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 60)) / (TsStd(TsDelta(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 1), 60) * 7.745966692414834 + 0.00000001)",
+    "rationale": "The source factor has a very strong IR (-2.6) and a solid monotonic tail profile. By applying Volatility_Adjusted_Momentum, we divide the signal by its rolling 60-minute standard deviation. This normalizes the autocorrelation intensity, penalizing periods of high noise and pushing the highest signal-to-noise ratio regimes to the extremes, further steepening the tails.",
+    "ir": -2.6838325440609028,
+    "full_ic": -0.0090670641986078,
+    "mean_ic": -0.009869496690501946,
+    "discovery_time": "2026-09-01T13:17:52.269327"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr",
+    "layer_found": 4,
+    "formula": "TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60)",
+    "rationale": "The idiosyncratic momentum of SMF EWMAC is very weak and flat. Applying Auto_Correlation to measure the 5-minute lagged correlation of this momentum checks if the abnormal flow is persistent. Persistent idiosyncratic flow indicates a hidden institutional accumulation, steepening the tails significantly.",
+    "ir": -2.6074616182893062,
+    "full_ic": -0.008618253895087555,
+    "mean_ic": -0.010052110512749008,
+    "discovery_time": "2026-09-01T04:53:01.853542"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_decay",
+    "layer_found": 5,
+    "formula": "TsDecay(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 5)",
+    "rationale": "This feature already exhibits a strong, monotonic return profile. Applying a 5-minute linear decay (TsDecay) provides a light polish, preserving the core momentum while filtering out micro-structural noise.",
+    "ir": -2.595183053655726,
+    "full_ic": -0.008813407248193829,
+    "mean_ic": -0.010146739967282332,
+    "discovery_time": "2026-09-01T10:38:25.312757"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_decay",
+    "layer_found": 5,
+    "formula": "TsDecay(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 10)",
+    "rationale": "Apply time-series decay to give higher weight to recent idiosyncratic momentum auto-correlation, enhancing signal responsiveness while maintaining structural stability.",
+    "ir": -2.564826594508506,
+    "full_ic": -0.00898977588005745,
+    "mean_ic": -0.01019440669362432,
+    "discovery_time": "2026-09-01T11:06:34.143579"
+  },
+  {
+    "name": "lob_imb_ewmac_z_abs_plateau",
+    "layer_found": 4,
+    "formula": "TsMean(IndicatorMoreThanZero(TsRank(Abs(TsZscore(EWMA(ExpOBI, 5) - EWMA(ExpOBI, 20), 120)), 120) - 0.9), 30)",
+    "rationale": "Since the absolute value aligns both extremes to a positive correlation, we measure the High Plateau Density. By calculating how often the signal stays in the top decile over a short window, we confirm sustained order book pressure rather than transient spikes.",
+    "ir": 2.53274932923748,
+    "full_ic": 0.008045736968129083,
+    "mean_ic": 0.007545230246224836,
+    "discovery_time": "2026-09-01T19:40:18.127853"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_mean",
+    "layer_found": 5,
+    "formula": "TsMean(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 10)",
+    "rationale": "The factor has strong negative IC and IR, but the left tail is a bit jagged. Applying a rolling mean over 10 minutes will smooth out transient spikes in the autocorrelation metric, making the signal more stable.",
+    "ir": -2.5194503194802826,
+    "full_ic": -0.009040094342396684,
+    "mean_ic": -0.010108709029747904,
+    "discovery_time": "2026-09-01T14:36:55.694159"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_polish",
+    "layer_found": 5,
+    "formula": "EWMA(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 3)",
+    "rationale": "This factor exhibits an incredibly strong IR (-2.607) and near-perfect monotonicity. A very fast EWMA smoothing (halflife 3) is applied merely to filter out residual tick-level micro-chatter, serving as the final polish for production.",
+    "ir": -2.5178055312254153,
+    "full_ic": -0.008993032263178742,
+    "mean_ic": -0.010132761966001122,
+    "discovery_time": "2026-09-01T07:41:56.125907"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_decay",
+    "layer_found": 5,
+    "formula": "TsDecay(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 15)",
+    "rationale": "The autocorrelation of idiosyncratic momentum exhibits a good trend but can be further refined. Smoothing it with TsDecay over 15 minutes reduces noise and emphasizes the persistent, underlying institutional accumulation.",
+    "ir": -2.4987295419662217,
+    "full_ic": -0.009032533654226113,
+    "mean_ic": -0.010092649821508008,
+    "discovery_time": "2026-09-01T05:40:02.248796"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_norm",
+    "layer_found": 5,
+    "formula": "TsZscore(EWMA(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 10), 120)",
+    "rationale": "Autocorrelation can be erratic. First smoothing it with a 10-minute EWMA and then Z-scoring it over a 2-hour window emphasizes sustained periods of high or low idiosyncratic momentum persistence.",
+    "ir": -2.3787754413438527,
+    "full_ic": -0.009071608340963407,
+    "mean_ic": -0.009211984989701959,
+    "discovery_time": "2026-09-01T17:49:38.155241"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_smooth",
+    "layer_found": 5,
+    "formula": "EWMA(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 5)",
+    "rationale": "The signal is already highly monotonic and robust. Apply a light EWMA to filter out micro-structure noise without lagging the signal significantly.",
+    "ir": -2.3770464003354195,
+    "full_ic": -0.008902550875226508,
+    "mean_ic": -0.009792958010662382,
+    "discovery_time": "2026-09-01T05:31:58.059540"
+  },
+  {
+    "name": "smf_ewmac_idio_mom_autocorr_rank_smooth",
+    "layer_found": 5,
+    "formula": "EWMA(TsRank(TsCorr(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), TsDelay(TsZscore(TsFacNeutralRes(EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 10) - EWMA(TsRank(TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 60), 60), 30), volume, 60), 60), 5), 60), 60), 10)",
+    "rationale": "The auto-correlation of idiosyncratic momentum already identifies persistent institutional accumulation. By applying a rolling TsRank and then smoothing with EWMA, we enforce strict uniform distribution and monotonicity, translating the raw correlation values into a robust percentile-based regime score.",
+    "ir": -2.376857645932664,
+    "full_ic": -0.00813767335052394,
+    "mean_ic": -0.009239674174241718,
+    "discovery_time": "2026-09-01T14:28:22.656819"
+  },
+  {
+    "name": "consec_down_pressure_norm",
+    "layer_found": 2,
+    "formula": "EWMA(MaxConsecDownTicks * volume, 10) / (EWMA(volume, 10) + 0.00000001)",
+    "rationale": "Normalizing the volume-weighted down ticks by the average volume to isolate the consecutive down tick effect from pure volume scale differences.",
+    "ir": 2.3640594796196757,
+    "full_ic": 0.00971129636178565,
+    "mean_ic": 0.009559510370041664,
+    "discovery_time": "2026-09-01T17:56:50.519216"
+  },
+  {
+    "name": "smf_micro_basis_corr",
+    "layer_found": 4,
+    "formula": "TsCorr(-TsZscore(TsSum(TsDelta(vwap, 1) * volume, 15) / (TsSum(volume, 15) + 0.00000001), 30), MicroPriceBasis, 60)",
+    "rationale": "To amplify the predictive power at the extremes, we cross-correlate the smart money flow with MicroPriceBasis. A high positive correlation indicates that smart money flow is aggressively lifting the micro-price, confirming strong, convicted directional momentum.",
+    "ir": 2.28918202271414,
+    "full_ic": 0.010252734755674826,
+    "mean_ic": 0.008797097225727154,
+    "discovery_time": "2026-09-01T12:52:12.315506"
+  },
+  {
+    "name": "vwap_close_div_skewness_sqrt",
+    "layer_found": 3,
+    "formula": "DistortSqrt(TsSkewness(TsZscore((close - vwap) / (vwap + 0.00000001), 20), 60))",
+    "rationale": "Applies a sign-preserving square root transformation to dampen extreme positive skewness spikes. This reduces the impact of heavy tails while maintaining the core monotonic upward trend.",
+    "ir": 2.090759720233728,
+    "full_ic": 0.008424409727760448,
+    "mean_ic": 0.007073025789384235,
+    "discovery_time": "2026-09-01T06:57:36.445325"
+  },
+  {
+    "name": "upward_vol_of_spread",
+    "layer_found": 1,
+    "formula": "Sqrt(TsMean(IfElse(MoreThan(SpreadCV, 0), SpreadCV * SpreadCV, 0), 15))",
+    "rationale": "计算买卖价差变异系数（SpreadCV）的上行半波动率。捕捉盘口价差剧烈扩大的单边烈度，往往预示着流动性正在被极速抽干，是突发大单冲击的先导信号。",
+    "ir": 2.0614786761485377,
+    "full_ic": 0.008040460087224904,
+    "mean_ic": 0.007217002517363324,
+    "discovery_time": "2026-09-01T05:23:25.769842"
+  },
+  {
+    "name": "pde_reversal_vol_corr",
+    "layer_found": 4,
+    "formula": "TsCorr((((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001) - TsMean((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 30)) / (TsStd((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 30) + 0.00000001) - TsMean(((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001) - TsMean((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 30)) / (TsStd((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 30) + 0.00000001), 30)) / (TsStd(((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001) - TsMean((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 30)) / (TsStd((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 30) + 0.00000001), 30) + 0.00000001), volume, 60)",
+    "rationale": "The reversal exhaustion signal has a negative IC but might be premature if not backed by volume. Using TsCorr with volume ensures that the exhaustion is associated with declining volume (drying up of liquidity). This filters out fake exhaustions, fixing the left tail monotonicity and amplifying the true reversal signal.",
+    "ir": -2.0285568890997827,
+    "full_ic": 0.009861430435107966,
+    "mean_ic": -0.008293499223257934,
+    "discovery_time": "2026-09-01T07:14:24.285584"
+  },
+  {
+    "name": "liq_drawdown_upward_vol",
+    "layer_found": 4,
+    "formula": "Sqrt(TsMean(IfElse(MoreThan(IfElse(TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60) > 0, TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60), 0), 0), IfElse(TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60) > 0, TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60), 0) * IfElse(TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60) > 0, TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60), 0), 0), 30))",
+    "rationale": "The precursor filters for positive skew breakouts to capture massive positive returns (+0.8 bps). To further isolate the panic-driven liquidity vacuums, Upward_Volatility measures the upside semi-volatility of this risk metric. This completely ignores mean-reverting noise and focuses purely on the explosive, one-sided severity of the drawdown.",
+    "ir": 1.9399454834105343,
+    "full_ic": 0.010619215388430822,
+    "mean_ic": 0.0074691635426587235,
+    "discovery_time": "2026-09-01T16:21:51.025145"
+  },
+  {
+    "name": "high_low_spread_volatility",
+    "layer_found": 1,
+    "formula": "TsStd((high - low) / (vwap + 0.00000001), 20)",
+    "rationale": "归一化高低价差的时序标准差。衡量分钟内极端波动幅度的发散程度，高值表明多空双方在剧烈争夺，分歧极大。",
+    "ir": -1.8514570813272297,
+    "full_ic": -0.008838276468098212,
+    "mean_ic": -0.012137628964064704,
+    "discovery_time": "2026-09-01T04:57:20.993977"
+  },
+  {
+    "name": "vwap_close_div_skewness",
+    "layer_found": 2,
+    "formula": "TsSkewness(TsZscore((close - vwap) / (vwap + 0.00000001), 20), 60)",
+    "rationale": "Captures the asymmetry (skewness) of the divergence. A high positive skew means the close price is being repeatedly and violently painted upwards relative to the VWAP, serving as a powerful micro-structural anomaly signal.",
+    "ir": 1.8314767463633839,
+    "full_ic": 0.008123971837850838,
+    "mean_ic": 0.006443995783558754,
+    "discovery_time": "2026-09-01T06:53:34.398032"
+  },
+  {
+    "name": "order_book_depth_decay",
+    "layer_found": 1,
+    "formula": "TsDecay((bid1 - ask1) / (bid1 + ask1 + 0.00000001), 10)",
+    "rationale": "10-minute linear decay of the Order Imbalance Ratio. Smooths out high-frequency quote flickering and captures the sustained static pressure of the limit order book.",
+    "ir": 1.8006314689133496,
+    "full_ic": 0.010607256191800475,
+    "mean_ic": 0.010704840743692445,
+    "discovery_time": "2026-09-01T07:18:18.235069"
+  },
+  {
+    "name": "price_spread_decay",
+    "layer_found": 1,
+    "formula": "TsDecay((ask1 - bid1) / ((bid1 + ask1) * 0.5 + 0.00000001), 10)",
+    "rationale": "Uses a linear decay moving average on the Price_Spread. It gives disproportionately more weight to recent spread widenings, acting as a fast-reacting friction indicator that warns of sudden liquidity withdrawals.",
+    "ir": -1.8006314689133278,
+    "full_ic": -0.010607256191800475,
+    "mean_ic": -0.010704840743692578,
+    "discovery_time": "2026-09-02T03:39:07.284404"
+  },
+  {
+    "name": "vol_weighted_spread_expansion",
+    "layer_found": 1,
+    "formula": "TsSum((ask1 - bid1) / (vwap + 0.00000001) * volume, 15) / (TsSum(volume, 15) + 0.00000001)",
+    "rationale": "A volume-weighted smoothing of the relative spread. High values indicate that the market is trading heavily while liquidity providers are actively pulling quotes (widening the spread), which is a classic precursor to volatility breakouts and panic-driven momentum.",
+    "ir": -1.6717391159457338,
+    "full_ic": -0.01008512776333314,
+    "mean_ic": -0.009994638736360821,
+    "discovery_time": "2026-09-01T12:21:35.590739"
+  },
+  {
+    "name": "weighted_oir_signal",
+    "layer_found": 1,
+    "formula": "TsSum((bid1 - ask1) / (bid1 + ask1 + 0.00000001) * volume, 15) / (TsSum(volume, 15) + 0.00000001)",
+    "rationale": "Smooths the Order Imbalance Ratio (OIR) using actual trading volume as weights. This heavily penalizes OIR signals during illiquid, low-volume periods, reducing noise from spoofing and isolating true order book pressure.",
+    "ir": 1.6711884607585237,
+    "full_ic": 0.01008507429209743,
+    "mean_ic": 0.009991179285888364,
+    "discovery_time": "2026-09-01T15:27:11.457614"
+  },
+  {
+    "name": "price_dir_eff_vol_res",
+    "layer_found": 4,
+    "formula": "TsFacNeutralRes(TsRank(TsCorr((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), TsDelay((close - TsDelay(close, 10)) / (TsSum(high - low, 10) + 0.00000001), 1), 20), 120), volume, 60)",
+    "rationale": "The original rank has a flat left tail and a noisy right tail. Residualizing against volume removes volume-driven false signals, leaving pure price-efficiency autocorrelation, which should steepen the left tail and clear up the right-tail noise.",
+    "ir": -1.6111306604584203,
+    "full_ic": -0.008389186518736887,
+    "mean_ic": -0.007441868073393912,
+    "discovery_time": "2026-09-01T07:58:46.900305"
+  },
+  {
+    "name": "vol_per_trade_tick_squeeze_log",
+    "layer_found": 3,
+    "formula": "DistortLog(TsStd(volume / (tick_count_trd + 0.00000001), 60) / (TsMad(volume / (tick_count_trd + 0.00000001), 60) + 0.00000001))",
+    "rationale": "The negative monotonicity is good, but the tail is choppy (-0.7 then -0.3). Applying a DistortLog transformation compresses extreme squeeze values, stabilizing the tail behavior and reducing variance.",
+    "ir": -1.4786781120565007,
+    "full_ic": -0.008046536990146935,
+    "mean_ic": -0.008958225078808106,
+    "discovery_time": "2026-09-01T16:29:01.357603"
+  },
+  {
+    "name": "liq_drawdown_risk_skew_max",
+    "layer_found": 3,
+    "formula": "TsMax(TsMean(SpreadCV * (1.0 - BuyRatio), 20) * TsSkewness(SpreadCV * (1.0 - BuyRatio), 60), 10)",
+    "rationale": "Since the predictive power lies in the extreme positive values, taking a rolling maximum extends the lifespan of these rare liquidity drawdown risk spikes, making the signal more persistent.",
+    "ir": 1.4333291436959303,
+    "full_ic": 0.008821823430111958,
+    "mean_ic": 0.005191296235502292,
+    "discovery_time": "2026-09-01T13:11:29.706184"
+  },
+  {
+    "name": "oi_vol_friction_dev_abs_rank_vol_squeeze",
+    "layer_found": 4,
+    "formula": "TsStd(TsRank(Abs(TsDelta(open_interest, 1) / (volume + 0.00000001) - TsMean(TsDelta(open_interest, 1) / (volume + 0.00000001), 60)), 60), 60) / (TsMad(TsRank(Abs(TsDelta(open_interest, 1) / (volume + 0.00000001) - TsMean(TsDelta(open_interest, 1) / (volume + 0.00000001), 60)), 60), 60) + 0.00000001)",
+    "rationale": "The ranked absolute deviation shows symmetric positive returns at both tails (+1.4 vs +1.2). Using Volatility_Squeeze over 60 minutes detects periods where this deviation is abnormally compressed. A volatility squeeze in deviation often precedes massive directional breakouts, converting the static U-shape into a highly predictive, monotonic pre-breakout indicator.",
+    "ir": -1.225452804260796,
+    "full_ic": -0.008076049765577341,
+    "mean_ic": -0.0027791289178917505,
+    "discovery_time": "2026-09-02T05:59:11.347005"
+  },
+  {
+    "name": "price_trend_consistency",
+    "layer_found": 1,
+    "formula": "TsMean(MoreThan(TsDelta(close, 1), 0), 30)",
+    "rationale": "Measures the pure win-rate (up-bars ratio) of the price over a 30-minute window. It acts as a highly robust, noise-resistant momentum indicator that ignores extreme absolute price jumps.",
+    "ir": -0.9293423285011869,
+    "full_ic": 0.008478789608362255,
+    "mean_ic": -0.0037245908753162898,
+    "discovery_time": "2026-09-01T20:11:39.921991"
+  }
+]

@@ -1,0 +1,58 @@
+{
+  "BuyRatio": {
+    "formula": "BuyRatio",
+    "description": "计算逻辑：基于“盘口自适应防御窗口 (Active Bounds)”的 VWAP 插值算法。通过单笔 Tick 内真实的成交均价 (Tick VWAP = $DeltaAmount / (DeltaVolume times Multiplier)$) 与上一笔及当前笔的 Bid/Ask 区间进行对比。若 VWAP 击穿最高 Ask 则记为 1.0 (纯扫买)，击穿最低 Bid 记为 0.0 (纯砸卖)，落于区间内则进行线性插值。最终聚合本分钟内所有 Tick 的量价加权平均比例。Alpha 含义：极其精准的微观买卖力量失衡指标。值趋近 1 代表强烈的市价多头扫单（Aggressive Buying），趋近 0 代表空头无情砸盘。是短线动量（Momentum）和反转（Reversal）策略的核心输入。"
+  },
+  "MicroPriceBasis": {
+    "formula": "MicroPriceBasis",
+    "description": "计算逻辑：本分钟内，Tick 真实成交均价（VWAP）与订单簿微观价格（Micro-Price）偏差的成交量加权均值。微观价格由买卖一档挂单量交叉加权得出：$MicroPrice = frac{Bid_1 times AskQty_1 + Ask_1 times BidQty_1}{AskQty_1 + BidQty_1}$。聚合公式为 $frac{sum (TickVWAP - MicroPrice) times Delta Volume}{sum Delta Volume}$。Alpha 含义：衡量市场吃单成本相对于挂单簿理论公允价值的溢价程度。正值表明多头吃单意愿强烈，愿意支付较多滑点向上吞噬流动性；负值反之。是预判短期价格重心的领先指标。"
+  },
+  "SpreadCV": {
+    "formula": "SpreadCV",
+    "description": "计算逻辑：买卖一档价差（Spread = Ask_1 - Bid_1）在本分钟内的变异系数（Coefficient of Variation）。公式：$frac{sigma(Spread)}{mu(Spread)}$。Alpha 含义：反映微观流动性的稳定性。高值意味着做市商（Market Maker）在频繁撤单和重置报价，盘口宽窄剧烈波动，通常是高波动事件发生、流动性抽干或突发大单冲击的先兆。"
+  },
+  "VolIncrementCV": {
+    "formula": "VolIncrementCV",
+    "description": "计算逻辑：Tick 级别成交量增量（$Delta Volume$）在本分钟内的变异系数。公式：$frac{sigma(Delta Volume)}{mu(Delta Volume)}$。Alpha 含义：度量成交爆发的“脉冲性”（Burstiness）。低值说明成交平缓均匀（如算法单 TWAP 执行），高值则代表有巨大的脉冲型成交块（Block Trades）或连环止损单（Stop-loss Cascades）出现，往往伴随市场微观结构的打破。"
+  },
+  "InfoToxicity": {
+    "formula": "InfoToxicity",
+    "description": "计算逻辑：本分钟内，每笔 Tick 的成交量增量（$Delta Volume$）与中间价变化（$Delta Mid$）的相关系数（Correlation）。Alpha 含义：度量逆向选择风险（Adverse Selection）。高度正相关说明“放量必涨”，高度负相关说明“放量必跌”，意味着市场中存在大量知情交易者（Informed Traders）。毒性飙升时，短期趋势通常会得以延续。"
+  },
+  "ExpOBI": {
+    "formula": "ExpOBI",
+    "description": "计算逻辑：对买卖五档挂单量进行指数衰减加权 $W = [1.0, 0.606, 0.367, 0.223, 0.135]$ 计算出的盘口深度不平衡度。公式：$frac{WeightedBid - WeightedAsk}{WeightedBid + WeightedAsk}$，取分钟内各 Tick 的算术均值。Alpha 含义：反映了挂单簿（Limit Order Book）深层的静态压力。正值表明下方托单（买单墙）厚重，负值表明上方压单沉重。常与 BuyRatio（动态市价单）结合使用，判断“挂单诱骗（Spoofing）”或真实的流动性枯竭。"
+  },
+  "MaxConsecUpTicks": {
+    "formula": "MaxConsecUpTicks",
+    "description": "计算逻辑：分钟内中间价 (Mid-Price) 发生“严格连续上涨”的最长快照笔数。一旦价格走平或下跌，游程计数器瞬间重置。Alpha 含义：捕捉极微观层面的一致性扫盘行为。长连击往往意味着机构正在使用切片算法无视成本地吃掉上方流动性。"
+  },
+  "MaxConsecUpAmp": {
+    "formula": "MaxConsecUpAmp",
+    "description": "计算逻辑：伴随 MaxConsecUpTicks 的游程，累加其连续上涨期间的对数收益率 ($sum ln(P_t/P_{t-1})$)。游程中断时重置，取本分钟内出现过的最大累计幅度。Alpha 含义：比起单纯的次数，它衡量了连续扫盘的“破坏力”。高值代表流动性极度真空下的价格旱地拔葱，容易触发短线动量耗竭后的均值回归（Mean Reversion）。"
+  },
+  "MaxConsecDownTicks": {
+    "formula": "MaxConsecDownTicks",
+    "description": "计算逻辑：分钟内中间价 (Mid-Price) 发生“严格连续下跌”的最长快照笔数。一旦价格走平或上涨，游程计数器瞬间重置。Alpha 含义：对称于 MaxConsecUpTicks，捕捉极微观层面的一致性砸盘行为。长连击意味着空头急于离场或恶意做空，无视成本向下索取流动性。"
+  },
+  "MaxConsecDownAmp": {
+    "formula": "MaxConsecDownAmp",
+    "description": "计算逻辑：伴随 MaxConsecDownTicks 的游程，累加其连续下跌期间的对数收益率。为保持正数衡量的对称性，代码实现采用 $sum ln(P_{t-1}/P_t)$。取本分钟内单次下跌游程的最大累计跌幅。Alpha 含义：衡量连续砸盘的“杀伤力”。高值代表下方买盘托单极度薄弱导致的价格自由落体，反映了市场的极端恐慌情绪，常常是孕育超跌反弹（Oversold Rebound）的温床。"
+  },
+  "MaxConsecBuyCount": {
+    "formula": "MaxConsecBuyCount",
+    "description": "计算逻辑：分钟内满足 $BuyRatio > 0.5$（主动买入主导）的连续 Tick 笔数最大值。Alpha 含义：捕捉连续的多头进攻。比起单纯看中间价上涨，连续的主动吃单更能反映真实资金的进场意愿和攻击性。"
+  },
+  "MaxConsecBuyVolume": {
+    "formula": "MaxConsecBuyVolume",
+    "description": "计算逻辑：伴随连续主买（$BuyRatio > 0.5$）游程，累加该游程期间的真实成交量（$Delta Volume$），游程中断即重置。取本分钟内的最高累计值。Alpha 含义：极为核心的“真实做多动能”指标。无量连买可能只是小单高频试探，但附带巨量连续成交的主买游程则是主力吸筹或暴力突破的确凿证据，动能延续性极强。"
+  },
+  "MaxConsecSellCount": {
+    "formula": "MaxConsecSellCount",
+    "description": "计算逻辑：分钟内满足 $BuyRatio < 0.5$（主动卖出主导）的连续 Tick 笔数最大值。Alpha 含义：捕捉连续的空头施压。在暴跌前夕，往往会先观察到盘口呈现长连击的暗中抛压。"
+  },
+  "MaxConsecSellVolume": {
+    "formula": "MaxConsecSellVolume",
+    "description": "计算逻辑：伴随连续主卖（$BuyRatio < 0.5$）游程，累加该游程期间的真实成交量（$Delta Volume$）。取本分钟内的最高累计值。Alpha 含义：真实的抛压重量。无量的阴跌可能是买盘暂时缺失，但带有巨量连击的主卖则意味着恐慌盘涌出或机构坚决派发止损，预示着上方将形成沉重的套牢阻力区。"
+  }
+}

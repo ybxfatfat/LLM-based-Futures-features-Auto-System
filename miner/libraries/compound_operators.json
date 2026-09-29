@@ -1,0 +1,10 @@
+{
+  "Path_Efficiency": {
+    "parameters": [
+      "input",
+      "window"
+    ],
+    "description": "路径效率 (RSI/Fractal Fractal Dimension 变体)。衡量价格或特征在窗口内沿单一方向运动的效率。趋近 1 代表绝对单边趋势，趋近 0 代表剧烈震荡无方向。",
+    "formula_template": "TsDelta({input}, {window}) / (TsSum(Abs(TsDelta({input}, 1)), {window}) + 1e-8)"
+  }
+}
