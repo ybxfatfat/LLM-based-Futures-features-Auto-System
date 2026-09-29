@@ -1,5 +1,4 @@
 """
-文件: future_sim/run/train_and_backtest_commodity.py
 =====================================================
 1. 加载 parquet 因子数据 → 洗盘(过滤非交易时段) → 训练 LightGBM → 生成样本外 (OOS) 信号
 2. NautilusTrader 正式回测：支持 Fixed Grid (最高水位线追加) 与 Dynamic Event (动态沙漏)

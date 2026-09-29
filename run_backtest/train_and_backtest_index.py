@@ -1,5 +1,4 @@
 """
-文件: future_sim/run/train_and_backtest_index.py
 =====================================================
 1. 加载 parquet 因子数据 → 训练 LightGBM → 生成样本外 (OOS) 信号
 2. NautilusTrader 正式回测：30分钟调仓 + GTD 限价单执行
