@@ -60,7 +60,7 @@ Instead of blind formula generation, the LLM progresses through a strictly scaff
 
 ## 🕸️ Phase 3: Graph-Based Feature Selection / 阶段三：基于图网络的特征正交与分层初筛
 
-Before feeding features into complex machine learning models, the system employs rigorous network theory and a hierarchical voting mechanism to deduplicate and extract orthogonal Alphas (`select_feature_2.py`). / 在进入树模型前，利用图网络与分层投票机制进行严格的因子正交去重与可用性初筛。
+Before feeding features into complex machine learning models, the system employs rigorous network theory and a hierarchical voting mechanism to deduplicate and extract orthogonal Alphas (`select_feature.py`). / 在进入树模型前，利用图网络与分层投票机制进行严格的因子正交去重与可用性初筛。
 
 *   **Hierarchical Community Discovery & Voting (社区发现与分层投票筛选)**:
     1. **Single-Instrument Pre-selection**: Within each highly-collinear feature community (extracted via Greedy Modularity), the system pre-selects the best performing feature for *each individual instrument* based on historical metrics. (单品种社区内预选：在每个高内聚的共线性特征社区内，首先针对单个品种，依据历史指标挑选出最优特征)。
@@ -72,17 +72,17 @@ Before feeding features into complex machine learning models, the system employs
 
 ## 🔍 Phase 4: High-Resolution Evaluation & Dashboard / 阶段四：高分辨率特征评价与看板
 
-To strictly prevent look-ahead bias, we built a robust multiprocessed evaluation suite (`feature_quality_2.py`). / 为严格防止未来函数泄露，设计了极速多进程评估引擎。
+To strictly prevent look-ahead bias, we built a robust multiprocessed evaluation suite (`feature_quality.py`). / 为严格防止未来函数泄露，设计了极速多进程评估引擎。
 
 *   **Period IC (2000-minute window)**: Replaced traditional Daily IC to perfectly align with a 2000-minute non-overlapping evaluation window. (采用 2000 分钟无重叠评价窗口，确保跨品种统计稳健性)。
 *   **Decile Return Spreads (Q10 - Q1)**: Automatically buckets features into 10 quantiles to track monotonicity. (自动划分为 10 组追踪单调性与多空收益差)。
-*   **AlphaMiner Pro Dashboard**: An interactive Streamlit app (`dashboard_app_2.py`) providing Feature-Centric Drilldowns and Scope-Centric Rankings. (交互式看板，支持单特征下钻与全市场横向阈值排行榜)。
+*   **AlphaMiner Pro Dashboard**: An interactive Streamlit app (`dashboard_app.py`) providing Feature-Centric Drilldowns and Scope-Centric Rankings. (交互式看板，支持单特征下钻与全市场横向阈值排行榜)。
 
 ---
 
 ## 📈 Phase 5: Position Mapping & Backtesting / 阶段五：仓位映射哲学与仿真回测
 
-In `tree_models_2.py`, we implemented a robust **"2x2 Orthogonal Matrix"** of mapping strategies to handle low signal-to-noise ratio (SNR) environments without data leakage. / 在树模型回测器中，实现了一个“2×2 正交矩阵式”映射策略，防泄露且抗低信噪比。
+In `tree_models.py`, we implemented a robust **"2x2 Orthogonal Matrix"** of mapping strategies to handle low signal-to-noise ratio (SNR) environments without data leakage. / 在树模型回测器中，实现了一个“2×2 正交矩阵式”映射策略，防泄露且抗低信噪比。
 
 #### Dimension 1: The Reference Timeframe (时间基准维度)
 *   **Real-time Rolling Windows (实时长窗口滚动)**: Dynamically calculates distribution statistics over a long lookback period to adapt to regime shifts. (长回看窗口动态计算分布，自适应市场状态漂移)。
