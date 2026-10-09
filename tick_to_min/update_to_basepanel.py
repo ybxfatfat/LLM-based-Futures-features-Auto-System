@@ -1,11 +1,54 @@
 # update_to_panel.py
 import pandas as pd
-import numpy as np
 from pathlib import Path
-import os
-import pyarrow.dataset as ds  # 💥 新增：处理分布式文件的工业级库
+import pyarrow.parquet as pq
 
 Year = 2024
+
+
+def _load_feature_batches_wide(features_path: Path, join_keys: list[str], approved_features: list[str]) -> pd.DataFrame:
+    """因子批次是按列拆分的：每个文件共享同一组行键，但携带不同的因子列。"""
+    if features_path.is_file():
+        parquet_files = [features_path]
+    else:
+        parquet_files = sorted(features_path.rglob("*.parquet"))
+
+    if not parquet_files:
+        raise FileNotFoundError(f"路径下没有 Parquet 文件: {features_path}")
+
+    feature_series: dict[str, pd.Series] = {}
+    for parquet_file in parquet_files:
+        schema_cols = set(pq.read_schema(parquet_file).names)
+        missing_keys = [key for key in join_keys if key not in schema_cols]
+        if missing_keys:
+            raise ValueError(f"{parquet_file.name} 缺少行键: {missing_keys}")
+
+        batch_features = [col for col in approved_features if col in schema_cols]
+        if not batch_features:
+            continue
+
+        batch = pd.read_parquet(parquet_file, columns=join_keys + batch_features)
+        batch["index_time"] = pd.to_datetime(batch["index_time"])
+        batch["instrument"] = batch["instrument"].astype(str)
+        batch["contract"] = batch["contract"].astype(str)
+
+        duplicated = batch.duplicated(join_keys, keep=False)
+        if duplicated.any():
+            sample = batch.loc[duplicated, join_keys].head(3).to_dict("records")
+            raise ValueError(f"{parquet_file.name} 内部存在重复行键，示例: {sample}")
+
+        batch = batch.set_index(join_keys)
+        for col in batch_features:
+            new_values = batch[col]
+            if col in feature_series:
+                # 后读入批次的非空值更新先前批次，空值不覆盖已有值。
+                new_values = new_values.combine_first(feature_series[col])
+            feature_series[col] = new_values
+
+    if not feature_series:
+        return pd.DataFrame(columns=join_keys)
+
+    return pd.concat(feature_series, axis=1).reset_index()
 
 def update_base_panel_with_features(base_panel_dir: Path, features_file_path: Path, target_instruments: list, approved_features: list):
     """
@@ -19,22 +62,18 @@ def update_base_panel_with_features(base_panel_dir: Path, features_file_path: Pa
         print(f"❌ 错误: 找不到特征路径: {features_file_path}")
         return
 
-    # 💥 架构级修复：使用 PyArrow Dataset 健壮地读取分布式落盘的碎片文件夹
-    # 它会自动忽略非 parquet 文件，并统一对齐 Schema
+    join_keys = ['index_time', 'instrument', 'contract']
+
+    # 因子批次是横向分列，必须逐文件按三键对齐，不能当作 Dataset 纵向堆叠。
     try:
-        dataset = ds.dataset(features_file_path, format="parquet")
-        df_features = dataset.to_table().to_pandas()
+        df_features = _load_feature_batches_wide(
+            features_file_path, join_keys, approved_features
+        )
     except Exception as e:
         print(f"❌ 错误: 无法解析 Parquet 目录: {str(e)}")
         return
-    
-    # 确保用于对齐的键的数据类型绝对一致
-    df_features['index_time'] = pd.to_datetime(df_features['index_time'])
-    df_features['contract'] = df_features['contract'].astype(str)
-    
+
     # 2. 严格执行白名单过滤！
-    join_keys = ['index_time', 'instrument', 'contract']
-    
     feature_cols = [col for col in approved_features if col in df_features.columns]
     missing_cols = [col for col in approved_features if col not in df_features.columns]
     
@@ -65,6 +104,7 @@ def update_base_panel_with_features(base_panel_dir: Path, features_file_path: Pa
         
         # 数据类型强转对齐
         df_base['index_time'] = pd.to_datetime(df_base['index_time'])
+        df_base['instrument'] = df_base['instrument'].astype(str)
         df_base['contract'] = df_base['contract'].astype(str)
         
         # 4. 从全量特征表中切分出当前品种的特征
@@ -79,36 +119,37 @@ def update_base_panel_with_features(base_panel_dir: Path, features_file_path: Pa
             continue
             
         print(f"   -> 提取到 {len(df_inst_features)} 行有效特征。")
-        print("🔗 正在执行智能 Left Join 拼接 (保留现有跨年特征)...")
-        
-        # 不再 drop 现有列！而是用 suffixes 区分老列和新列
-        df_merged = pd.merge(
-            df_base,
-            df_inst_features,
-            on=['index_time', 'contract'],
-            how='left',
-            suffixes=('', '_new')
-        )
-        
-        # 智能打补丁 (Patch)
+        print("🔗 正在按 index_time/instrument/contract 一对一增量更新...")
+
+        if df_base.duplicated(join_keys).any():
+            raise ValueError(f"{panel_path.name} 本身存在重复行键，为避免扩行已停止写入")
+        if df_inst_features.duplicated(join_keys).any():
+            raise ValueError(f"{inst} 的特征宽表存在重复行键，为避免扩行已停止写入")
+
+        original_columns = list(df_base.columns)
+        df_merged = df_base.set_index(join_keys, verify_integrity=True)
+        incoming = df_inst_features.set_index(join_keys, verify_integrity=True).reindex(df_merged.index)
+
+        # 新的非空值覆盖同键旧值；新数据缺失时保留已存储的历史特征。
         for col in feature_cols:
-            col_new = f"{col}_new"
-            if col_new in df_merged.columns:
-                if col in df_merged.columns:
-                    mask = df_merged[col_new].notna()
-                    df_merged.loc[mask, col] = df_merged.loc[mask, col_new]
-                else:
-                    df_merged[col] = df_merged[col_new]
-                
-                df_merged = df_merged.drop(columns=[col_new])
-        
+            if col in df_merged.columns:
+                df_merged[col] = incoming[col].combine_first(df_merged[col])
+            else:
+                df_merged[col] = incoming[col]
+
+        df_merged = df_merged.reset_index()
+        new_columns = [col for col in feature_cols if col not in original_columns]
+        df_merged = df_merged[original_columns + new_columns]
+
         # 3. 排序保证时序绝对正确
         df_merged = df_merged.sort_values(['index_time', 'contract']).reset_index(drop=True)
         
         print("💾 正在回写 Parquet 文件...")
         
         save_path = base_panel_dir / inst / f"base_panel_{inst}_parquet.parquet"
-        df_merged.to_parquet(save_path)
+        temp_path = save_path.with_name(f"{save_path.name}.tmp")
+        df_merged.to_parquet(temp_path, index=False)
+        temp_path.replace(save_path)
         print(f"✅ {inst} 拼接完毕！文件已保存至: {save_path.name}")
 
 if __name__ == "__main__":

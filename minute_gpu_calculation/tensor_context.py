@@ -41,9 +41,12 @@ class InstrumentContext:
 
         from .utils.calendar_db import get_date_shift
         real_fetch_start = get_date_shift(pd.to_datetime(target_start), -warm_up_days)
+        target_end_ts = pd.to_datetime(target_end)
+        target_end_exclusive = target_end_ts + pd.Timedelta(days=1) if target_end_ts == target_end_ts.normalize() else None
 
         # 过滤多余的废数据，只让需要的数据进入 GPU
-        panel_df = panel_df[(panel_df['index_time'] >= real_fetch_start) & (panel_df['index_time'] <= pd.to_datetime(target_end))]
+        end_mask = panel_df['index_time'] < target_end_exclusive if target_end_exclusive is not None else panel_df['index_time'] <= target_end_ts
+        panel_df = panel_df[(panel_df['index_time'] >= real_fetch_start) & end_mask]
         
         print(f"[{self.instrument_id}] 正在构建致密张量宇宙...")
         
@@ -65,7 +68,7 @@ class InstrumentContext:
         lifecycles = panel_df.groupby('contract')['index_time'].agg(['min', 'max'])
         
         # 3. 提取特征列
-        exclude_cols = {'index_time', 'contract', 'trading_date'}
+        exclude_cols = {'index_time', 'contract', 'trading_date', 'main_contract'}
         feature_cols = [c for c in panel_df.columns if c not in exclude_cols]
         fill_zero_cols = {'volume', 'tick_count', 'tick_count_trd'}
         

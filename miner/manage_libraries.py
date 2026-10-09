@@ -16,12 +16,12 @@ import re
 import argparse
 from pathlib import Path
 
-# Add project root to sys.path
-project_root = Path(__file__).resolve().parent
+# Add repository root so package-qualified imports work from any cwd.
+project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from libraries import (
+from miner.libraries import (
     load_foundation_features,
     load_compound_operators,
     register_foundation_feature,

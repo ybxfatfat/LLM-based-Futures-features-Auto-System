@@ -198,6 +198,11 @@ class BatchExecutor:
         
         ts_target_start = pd.to_datetime(target_start) if target_start else None
         ts_target_end = pd.to_datetime(target_end) if target_end else None
+        target_end_exclusive = (
+            ts_target_end + pd.Timedelta(days=1)
+            if ts_target_end is not None and ts_target_end == ts_target_end.normalize()
+            else None
+        )
 
         for inst_id, inst_ctx in self.global_ctx.inst_contexts.items():
             if not hasattr(inst_ctx, 'switch_cycle_map'):
@@ -211,7 +216,10 @@ class BatchExecutor:
             # 1. 时间截断掩码 (剔除预热期)
             mask = np.ones(len(time_idx), dtype=bool)
             if ts_target_start: mask &= (time_idx >= ts_target_start)
-            if ts_target_end:   mask &= (time_idx <= ts_target_end)
+            if target_end_exclusive is not None:
+                mask &= (time_idx < target_end_exclusive)
+            elif ts_target_end is not None:
+                mask &= (time_idx <= ts_target_end)
             
             valid_times = time_idx[mask]
             if len(valid_times) == 0:

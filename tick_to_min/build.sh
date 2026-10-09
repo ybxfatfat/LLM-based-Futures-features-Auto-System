@@ -3,9 +3,10 @@
 # High-Frequency Futures Feature Engine Build Script
 # ==========================================
 
-# 1. 编译 C++ 零拷贝加速引擎
+# 1. 编译 C++ Tick 计算引擎
 echo "Compiling C++ Tick Engine..."
-cd ./tick_to_min
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 g++ -O3 -Wall -shared -std=c++11 -fPIC $(python3 -m pybind11 --includes) tick_engine.cpp -o tick_engine$(python3-config --extension-suffix)
 echo "C++ Engine Compiled Successfully."
 

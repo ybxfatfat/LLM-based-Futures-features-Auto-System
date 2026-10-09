@@ -382,8 +382,9 @@ public:
         rb_.push(inputs_[0]->get_value());
         if (rb_.count >= min_periods_)
         {
-            // 返回最老的一个元素。如果是 bucket 模式(w=0)，返回第0个。
-            val_ = (window_ == 0) ? rb_.buffer[0] : rb_.buffer[rb_.head];
+            // 返回当前有效样本中最老的一个；窗口未填满时 head 指向的是下一个空槽。
+            int oldest_idx = (window_ == 0) ? 0 : (rb_.head - rb_.count + rb_.window) % rb_.window;
+            val_ = rb_.buffer[oldest_idx];
         }
         else
         {
@@ -613,6 +614,7 @@ class OpEWMA : public OpNode
 {
 private:
     float alpha_;
+    float state_ = NAN;
     bool initialized_ = false;
 
 public:
@@ -631,18 +633,20 @@ public:
         {
             if (!initialized_)
             {
-                val_ = x;
+                state_ = x;
                 initialized_ = true;
             }
             else
             {
-                val_ = alpha_ * x + (1.0f - alpha_) * val_;
+                state_ = alpha_ * x + (1.0f - alpha_) * state_;
             }
+            val_ = state_;
         }
     }
     void clear() override
     {
         initialized_ = false;
+        state_ = NAN;
         val_ = NAN;
     }
 };

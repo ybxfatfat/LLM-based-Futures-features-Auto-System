@@ -1,30 +1,30 @@
 # 🚀 High-Frequency Futures Alpha Engine: GPU-Accelerated DAG Compiler
 ### 期货高频因子图计算与 GPU 异步并发引擎
 
-An ultra-low latency, highly scalable GPU-based quantitative feature engineering subsystem designed for high-frequency futures markets. This engine compiles textual LLM-generated alpha formulas into an optimized Execution DAG, aggressively manages VRAM via topological Garbage Collection, and eliminates PCIe bottlenecks through "Pin Memory" Data-Stationary architecture.
+A GPU-based quantitative feature-engineering subsystem for minute-level futures research. It compiles textual alpha formulas into an execution DAG, reuses common subexpressions, releases eligible intermediates by graph lifetime, and keeps base tensors resident on the GPU across formula batches to reduce repeated transfers.
 
-本系统是专为高频期货市场设计的极速 GPU 量化特征计算引擎。它能够将 LLM 生成的因子公式文本实时编译为优化的有向无环图 (DAG)，通过拓扑级垃圾回收机制极致榨取显存，并利用“数据不动指令动”的常驻显存架构彻底消灭 PCIe 传输瓶颈。
+本系统是一套面向分钟频期货研究的 GPU 特征计算引擎。它将文本因子公式编译为有向无环图（DAG），复用公共子表达式，按图生命周期释放符合条件的中间张量，并让基础张量在公式批次间驻留 GPU，以减少重复数据搬运。
 
 ---
 
 ## 🔥 Core Architectures & Engineering Innovations (核心架构与工程设计)
 
 ### 1. AST-Driven DAG Compilation & CSE (基于抽象语法树的 DAG 编译与去重)
-*   **[EN]** Instead of relying on slow `eval()` or procedural loops, the engine utilizes a custom Python AST `NodeTransformer` to parse alpha formulas into mathematical trees. It mathematically sorts commutative operations and enforces **Common Subexpression Elimination (CSE)**. If 50 formulas use `TsMean(close, 20)`, the engine computes it exactly once, drastically compressing the computational volume.
-*   **[CN]** 摒弃了低效的 `eval()` 解析，底层利用 Python原生 `ast` 模块将大模型生成的因子公式编译为数学语法树。引擎支持交换律排序并实现了**公共子表达式消除 (CSE)**：如果 50 个复杂因子都用到了 `TsMean(close, 20)`，系统在全局只会计算一次，从编译层面对图体积进行了极度压缩。
+*   **[EN]** The engine uses a custom Python AST `NodeTransformer` to parse alpha formulas into mathematical trees instead of evaluating arbitrary formula strings with `eval()`. It canonicalizes supported commutative operations and applies **Common Subexpression Elimination (CSE)**. If 50 formulas contain the same canonical `TsMean(close, 20)` node, that node is represented once in the shared graph.
+*   **[CN]** 引擎使用 Python `ast` 与自定义 `NodeTransformer` 将因子公式解析为数学语法树，而不是直接用 `eval()` 执行任意字符串。它会规范化受支持的交换运算并执行**公共子表达式消除（CSE）**；如果 50 个公式包含同一个规范化后的 `TsMean(close, 20)` 节点，共享图中只保留一份该节点。
 
-### 2. Zero-IO "Formula Chunking" via Pin Memory (基于常驻显存的“列式分块”与零 IO 损耗)
-*   **[EN]** Traditional time-series chunking suffers from massive CPU-to-GPU PCIe transfer overheads. This architecture implements a **Graph Width Partitioning (Formula Chunking)** approach. The entire year's Base Panel (high, low, close, order book depth) is loaded and pinned in the GPU VRAM at initialization. Formulas are then dispatched in batches, transforming the GPU into a pure execution state with absolutely zero I/O transfer latency during computation.
-*   **[CN]** 传统的“按时间分块”会引发巨大的 CPU 到 GPU PCIe 总线拷贝开销。本系统创新性地采用了**图宽度切分 (按公式分批)** 架构。在系统启动时，将全市场整年的基础面板（量价、盘口深度等）一次性灌入并死死“钉”在 GPU 显存中 (Pin Memory)。后续计算仅在显存内部进行纯净的张量运算，彻底消灭了数据搬运损耗。
+### 2. Data-Stationary Formula Chunking (基于常驻显存的公式分块)
+*   **[EN]** Rather than repeatedly chunking the time axis, the engine partitions the graph by formula width. Base-panel tensors are transferred to GPU memory during initialization and reused across formula batches, reducing repeated PCIe traffic during the compute phase. Initial loading, final export, and any explicit device conversion still incur I/O or copies.
+*   **[CN]** 引擎不反复切分时间轴，而是按公式宽度划分计算图。基础面板张量在初始化阶段传入 GPU，并在多个公式批次间复用，从而减少计算阶段的重复 PCIe 传输；初始加载、最终导出及显式设备转换仍然会发生 I/O 或复制。
 
 ### 3. Dual-Layer Asynchronous Execution (双层异步流并发调度)
-*   **[EN]** The `BatchExecutor` implements concurrency on two dimensions. Topologically, it respects the Execution Barrier of the DAG layers. Horizontally, it leverages `torch.cuda.Stream` to dispatch non-blocking operator kernels across different financial instruments simultaneously. A cross-sectional alignment bridge seamlessly merges local instrument time-series (`T_i`) into global macro time (`Global_T`) for zero-copy cross-sectional operations.
-*   **[CN]** `BatchExecutor` 实现了二维并发调度：在纵向拓扑上，严格维持 DAG 执行层的同步屏障；在横向品种上，为每个期货品种分配独立的 `torch.cuda.Stream`，瞬间发射核函数 (Kernel) 实现全市场异步并行。对于截面算子，设计了动态对齐桥，将局部时间轴极速投影至全局时间，实现无缝的截面排序与标准化。
+*   **[EN]** The `BatchExecutor` coordinates two dimensions of concurrency. It respects DAG-layer barriers while using `torch.cuda.Stream` to dispatch eligible kernels for different instruments. A cross-sectional alignment bridge maps local instrument time axes (`T_i`) to a shared global axis (`Global_T`) before cross-sectional operators run.
+*   **[CN]** `BatchExecutor` 协调两个维度的并发：纵向遵守 DAG 层间屏障，横向使用 `torch.cuda.Stream` 调度不同品种中可并行的核函数。截面算子执行前，动态对齐桥会把各品种局部时间轴（`T_i`）映射到共享全局时间轴（`Global_T`）。
 
 ### 4. Topological Garbage Collection & Lifecycle Masking (拓扑级内存冲水与生命周期掩码)
-*   **[EN]** VRAM is strictly protected. Every intermediate DAG node tracks its `out_degree`. The exact millisecond a temporary tensor is no longer needed by downstream operators, a layer-wise Garbage Collection barrier triggers `delete()` to free the memory. Furthermore, a boolean **Lifecycle Mask Matrix** is initialized at runtime to strictly eliminate "zombie prices" (unlisted/delisted contracts), preventing cross-sectional metric contamination.
-*   **[CN]** 实现了极其严苛的显存保护机制。系统在编译期为每个节点计算出度 (`out_degree`)。在每一层计算结束的屏障处，出度归零的中间临时张量会被立刻安全释放 (GC 冲水)，极大降低了显存峰值。此外，底层构建了严格的**生命周期掩码矩阵 (Lifecycle Mask)**，物理级屏蔽了退市/未上市合约的僵尸数据，确保截面特征统计的绝对纯净。
+*   **[EN]** Every intermediate DAG node tracks its `out_degree`. At a layer barrier, an intermediate whose downstream consumers are complete becomes eligible for deletion, which helps limit peak VRAM usage. A boolean **Lifecycle Mask Matrix** excludes observations outside each contract's listed-data interval from cross-sectional calculations.
+*   **[CN]** 每个 DAG 中间节点都会跟踪其 `out_degree`。在层间屏障处，下游消费者均已完成的中间张量会进入可释放状态，以控制显存峰值。布尔型**生命周期掩码矩阵（Lifecycle Mask）**则用于排除合约有数据生命周期之外的观测，减少截面统计污染。
 
 ### 5. Strategy-Aligned Late Masking (实战导向的延迟掩码截断)
-*   **[EN]** Rather than aligning everything strictly to the dominant contract upfront—which destroys historical continuity—the engine computes all tensor features in a complete continuous universe. It applies **Late Masking** only at the final export phase, instantly slicing the active main contracts via highly optimized NumPy operations, ensuring perfect alignment with real-world trading logic.
-*   **[CN]** 摒弃了在特征计算前就强行拼接主力合约的做法（这会导致时间序列指标跳空失真）。引擎在完整、平滑的全合约平行宇宙中计算所有指标，仅在最终落盘导出前，利用预先构建的路由字典执行**延迟掩码 (Late Masking)**，瞬间抽出所有对角线上的真实主力数据，完美契合实盘持仓逻辑。
+*   **[EN]** Instead of stitching a dominant-contract series before feature calculation, the engine computes each contract's tensors first and applies **Late Masking** during export using the configured main-contract routing. This preserves contract-local history during calculation while making the final panel follow the selected routing rule.
+*   **[CN]** 引擎不会在特征计算前先拼接主力连续序列，而是先在各合约自身序列上计算张量，再在导出阶段依据既定主力合约路由执行**延迟掩码（Late Masking）**。这样既保留计算时的合约内历史，也使最终面板遵循所选主力路由规则。

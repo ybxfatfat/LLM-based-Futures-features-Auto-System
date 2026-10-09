@@ -1,31 +1,23 @@
 """
 =====================================================
-1. 加载 parquet 因子数据 → 训练 LightGBM → 生成样本外 (OOS) 信号
-2. NautilusTrader 正式回测：30分钟调仓 + GTD 限价单执行
+读取外部生成的目标仓位信号，执行 NautilusTrader 30分钟调仓 + GTD 限价单回测。
 
-池子: index (CSZ→IF, C500Z→IC, SS50Z→IH, C1000Z→IM)
+池子: index (IF, IC, IH, IM)
 
 使用:
-    python train_and_backtest_index.py                          # 全量
-    python train_and_backtest_index.py --train-only             # 只训练
-    python train_and_backtest_index.py --backtest-only          # 只回测
+    python train_and_backtest_index.py                          # 使用默认信号文件
+    python train_and_backtest_index.py --signals=/path/to/signals.parquet
     python train_and_backtest_index.py --date=20251231          # 指定回测日期
 """
 
 import os
 import re
 import glob
-import gc
-import json
-import pickle
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
-import pyarrow.parquet as pq
-from scipy.stats import spearmanr
 from datetime import datetime, timezone, timedelta, time as dt_time
 from decimal import Decimal
 
@@ -38,12 +30,7 @@ CN_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 DATA_DIR = str(project_root / "data")
-PARQUET_PATH = f"{DATA_DIR}/factor_dataset_AllMarket_main_only_1Year.parquet"
-FEATURES_PATH = f"{DATA_DIR}/best_features_index.json"
-SIGNALS_OUT = f"{DATA_DIR}/oos_signals_index.parquet"
-MODEL_OUT = f"{DATA_DIR}/lgb_model_index.pkl"
-
-TARGET = "Ret_30m_Fwd"
+SIGNALS_PATH = f"{DATA_DIR}/oos_signals_index.parquet"
 
 # ---- 池子映射: 纯净版标准前缀 ----
 POOL_CONFIG = {
@@ -62,24 +49,7 @@ INSTRUMENT_SPECS = {
 
 FEE_RATE = 0.00030   # CFFEX 基准费率
 
-LGB_PARAMS = dict(
-    n_estimators=5000,
-    objective="regression",
-    metric="rmse",
-    learning_rate=0.01,
-    max_depth=12,
-    num_leaves=63,
-    feature_fraction=0.8,
-    bagging_fraction=0.7,
-    bagging_freq=5,
-    n_jobs=-1,
-    random_state=42,
-    verbose=-1,
-)
-
 # ---- 策略参数 ----
-ZSCORE_LOOKBACK = 2000       # 滚动 z-score 窗口 (分钟 bar)
-ZSCORE_CLIP = 3.0            # z-score 截断
 MAX_WEIGHT_PER_INST = 1.0    # 单品种满仓
 TOTAL_CAPITAL = 10_000_000   # 总资金 (CNY)
 REBALANCE_INTERVAL_MIN = 30  # 调仓间隔
@@ -91,162 +61,28 @@ MAPPING_TYPE = "zscore"  # zscore, robust, quantile
 
 
 # ═══════════════════════════════════════════════════════════════
-# 1. 工具函数
+# 1. 信号加载
 # ═══════════════════════════════════════════════════════════════
 
-def parquet_contract_to_futures(prefix: str, contract: str) -> str:
-    """parquet 合约 'YYYYMM' → 期货代码 'PREFIXYYM'"""
-    yy = contract[2:4]
-    mm = contract[4:6]
-    return f"{prefix}{yy}{mm}"
+def load_signal_source(path: str = SIGNALS_PATH) -> pd.DataFrame:
+    """读取模型流程预先生成的目标仓位信号，不在回测脚本中训练模型。"""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"找不到信号文件: {path}")
 
+    signals_df = pd.read_parquet(path)
+    required = {"index_time", "instrument", "futures_code", f"tw_{MAPPING_TYPE}"}
+    missing = required.difference(signals_df.columns)
+    if missing:
+        raise ValueError(f"信号文件缺少必要字段: {sorted(missing)}")
 
-# ═══════════════════════════════════════════════════════════════
-# 2. 特征加载
-# ═══════════════════════════════════════════════════════════════
-
-def load_features() -> list[str]:
-    with open(FEATURES_PATH, "r") as f:
-        data = json.load(f)
-    raw = data["Feature"] if isinstance(data, dict) and "Feature" in data else data
-    all_cols = pq.read_schema(PARQUET_PATH).names
-    features = [f for f in raw if f in all_cols]
-    print(f"✅ {len(features)}/{len(raw)} 特征可用")
-    return features
-
+    signals_df["index_time"] = pd.to_datetime(signals_df["index_time"])
+    signals_df = signals_df[signals_df["instrument"].isin(POOL_CONFIG)].copy()
+    if signals_df.empty:
+        raise ValueError("信号文件中没有股指池对应的数据")
+    return signals_df.sort_values(["futures_code", "index_time"]).reset_index(drop=True)
 
 # ═══════════════════════════════════════════════════════════════
-# 3. 训练 & 信号生成
-# ═══════════════════════════════════════════════════════════════
-
-def train_and_generate_signals() -> pd.DataFrame:
-    """训练 LightGBM（带波动率权重），生成 OOS 信号（支持多种 Mapping）。"""
-    features = load_features()
-    pool_instruments = list(POOL_CONFIG.keys())
-
-    all_cols = ["index_time", "instrument", "contract", TARGET] + features
-    table = pq.read_table(
-        PARQUET_PATH, columns=[c for c in all_cols if c in pq.read_schema(PARQUET_PATH).names],
-        filters=[("instrument", "in", pool_instruments)],
-    )
-    df = table.to_pandas()
-    df["index_time"] = pd.to_datetime(df["index_time"]).dt.tz_localize(CN_TZ)
-    df = df.dropna(subset=[TARGET]).sort_values("index_time").reset_index(drop=True)
-
-    # 👑 核心绝招：不改 TARGET！计算历史波动率倒数作为 LightGBM 的 Sample Weight
-    print("\n⚙️ 正在计算目标波动率权重 (Sample Weights)...")
-    target_vol = df.groupby('instrument')[TARGET].transform(
-        lambda x: x.shift(30).rolling(2000, min_periods=100).std()
-    )
-    df['Weight'] = 1.0 / (target_vol + 1e-8)
-    df = df.dropna(subset=['Weight']).reset_index(drop=True)
-
-    print(f"📦 加载: {len(df):,} 行, {len(features)} 特征, {df['instrument'].nunique()} 品种")
-    print(f"   时间: {df['index_time'].min()} → {df['index_time'].max()}")
-
-    split_idx = int(len(df) * 0.8)
-    oos_start_time = df.loc[split_idx, 'index_time']
-    print(f"⏱️ 切分点: {oos_start_time}（{split_idx:,}/{len(df):,}）")
-
-    # 💥 核心纠错：加入 30 个 bar 的 Embargo (隔离带) 防泄露
-    embargo_idx = split_idx - 30 
-    
-    X_train, y_train = df.iloc[:embargo_idx][features], df.iloc[:embargo_idx][TARGET]
-    w_train = df.iloc[:embargo_idx]['Weight']
-    X_test,  y_test  = df.iloc[split_idx:][features],  df.iloc[split_idx:][TARGET]
-
-    print("🧠 训练 带权重的 LightGBM ...")
-    model = lgb.LGBMRegressor(**LGB_PARAMS)
-    model.fit(
-        X_train, y_train,
-        sample_weight=w_train,  # 👑 喂给模型
-        eval_set=[(X_test, y_test)],
-        eval_metric="rmse",
-        callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=True)],
-    )
-    n_trees = model.best_iteration_ or model.n_estimators_
-
-    with open(MODEL_OUT, "wb") as f:
-        pickle.dump(model, f)
-    print(f"💾 模型: {MODEL_OUT}")
-
-    # ⚡ 全量预测（训练期 + OOS，用于 z-score warm-up）
-    df["Pred"] = model.predict(df[features])
-
-    # ✅ 方向必须只依赖训练集，绝对不能看全量数据的 IC
-    df_train = df.iloc[:split_idx]
-    inst_directions = {}
-    for inst in df_train['instrument'].unique():
-        sub = df_train[df_train['instrument'] == inst].dropna(subset=['Pred', TARGET])
-        inst_directions[inst] = 1.0 if (len(sub) >= 100 and sub['Pred'].corr(sub[TARGET]) >= 0) else -1.0
-    print(f"📌 方向(基于训练集): {inst_directions}")
-
-    # OOS IC 评估（只用 OOS 行）
-    oos = df.iloc[split_idx:].copy()
-    full_ic, _ = spearmanr(oos["Pred"], oos[TARGET])
-    oos["Date"] = oos["index_time"].dt.date
-    daily_ic = oos.groupby("Date").apply(
-        lambda x: spearmanr(x["Pred"], x[TARGET])[0] if len(x) > 20 else np.nan
-    ).dropna()
-    mean_ic = daily_ic.mean()
-    ir = mean_ic / daily_ic.std() * np.sqrt(252) if daily_ic.std() > 0 else 0
-    print(f"📊 OOS: Full IC={full_ic:.5f}, Mean Daily IC={mean_ic:.5f}, IR={ir:.3f}, Trees={n_trees}")
-
-    print(f"🔮 生成 OOS 信号 (全量 warm-up, lookback={ZSCORE_LOOKBACK}) ...")
-    parts = []
-    for inst in pool_instruments:
-        prefix = POOL_CONFIG[inst]
-        all_data = df[df["instrument"] == inst].copy()
-        
-        # 基础统计量
-        r = all_data["Pred"].rolling(ZSCORE_LOOKBACK, min_periods=ZSCORE_LOOKBACK // 2)
-        s = r.std()
-        q75 = r.quantile(0.75)
-        q25 = r.quantile(0.25)
-        q95 = r.quantile(0.9)  # 对应你新代码里的 0.9
-        q05 = r.quantile(0.1)  # 对应你新代码里的 0.1
-
-        # 💡 1: Z-Score，不减均值 m，仅用标准差 s 缩放
-        all_data["zscore"] = (all_data["Pred"] / (s + 1e-8)).fillna(0)
-        all_data["tw_zscore"] = np.clip(all_data["zscore"] / ZSCORE_CLIP, -1.0, 1.0)
-
-        # 💡 2: Robust Z，不减中位数 med，仅用 IQR 极差缩放
-        all_data["robust_z"] = (all_data["Pred"] / ((q75 - q25) / 1.349 + 1e-8)).fillna(0)
-        all_data["tw_robust"] = np.clip(all_data["robust_z"] / ZSCORE_CLIP, -1.0, 1.0)
-
-        # 💡 3: Extreme 10%，加入了绝对符号约束
-        all_data["tw_quantile"] = np.where(
-            (all_data["Pred"] > q95) & (all_data["Pred"] > 0), 1.0,
-            np.where((all_data["Pred"] < q05) & (all_data["Pred"] < 0), -1.0, 0.0)
-        )
-
-        # 乘上方向因子
-        direction = inst_directions.get(inst, 1.0)
-        all_data["tw_zscore"] *= direction
-        all_data["tw_robust"] *= direction
-        all_data["tw_quantile"] *= direction
-
-        all_data["raw_signal"] = all_data["Pred"]
-        all_data["futures_code"] = all_data["contract"].apply(
-            lambda c: parquet_contract_to_futures(prefix, str(c))
-        )
-
-        # 按时间过滤 OOS
-        oos_only = all_data[all_data["index_time"] >= oos_start_time].copy()
-        keep = ["index_time", "instrument", "contract", "futures_code",
-                "raw_signal", "tw_zscore", "tw_robust", "tw_quantile"]
-        parts.append(oos_only[keep])
-
-    signals_df = pd.concat(parts, ignore_index=True)
-    signals_df = signals_df.sort_values(["futures_code", "index_time"]).reset_index(drop=True)
-    signals_df.to_parquet(SIGNALS_OUT, index=False)
-    print(f"💾 信号: {SIGNALS_OUT} ({len(signals_df):,} 行)")
-    print(f"   OOS 期间: {signals_df['index_time'].min()} → {signals_df['index_time'].max()}")
-    return signals_df
-
-
-# ═══════════════════════════════════════════════════════════════
-# 4. 信号索引
+# 2. 信号索引
 # ═══════════════════════════════════════════════════════════════
 
 def build_signal_index(signals_df: pd.DataFrame):
@@ -271,10 +107,10 @@ def build_signal_index(signals_df: pd.DataFrame):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 5. NautilusTrader 回测
+# 3. NautilusTrader 回测
 # ═══════════════════════════════════════════════════════════════
 
-# --- 所有 import 放这里，避免训练阶段加载 NautilusTrader ---
+# --- 所有 NautilusTrader import 集中放在回测部分 ---
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.model.data import OrderBookDepth10, BookOrder
 from nautilus_trader.model.enums import (
@@ -414,9 +250,10 @@ def load_snapshots_for_date(
                         asks.append(BookOrder(OrderSide.SELL,
                             Price.from_str(str(ap)), Quantity.from_str(str(int(aq))), 0))
                         b_cts.append(0); a_cts.append(0)
-                    zero = BookOrder(OrderSide.BUY, Price.from_str("0"), Quantity.from_str("0"), 0)
+                    zero_bid = BookOrder(OrderSide.BUY, Price.from_str("0"), Quantity.from_str("0"), 0)
+                    zero_ask = BookOrder(OrderSide.SELL, Price.from_str("0"), Quantity.from_str("0"), 0)
                     for _ in range(6, 11):
-                        bids.append(zero); asks.append(zero)
+                        bids.append(zero_bid); asks.append(zero_ask)
                         b_cts.append(0); a_cts.append(0)
                     snaps.append(OrderBookDepth10(
                         InstrumentId.from_str(inst_str),
@@ -485,15 +322,15 @@ class IndexIntradayStrategy(Strategy):
 
         # 基础状态控制
         self._current_day_ordinal: Optional[int] = None
-        self._last_minute: Optional[int] = None        
-        self._last_slot: Optional[int] = None          
+        self._last_minute_by_inst: dict[str, tuple[int, int]] = {}
+        self._last_slot_by_inst: dict[str, int] = {}
         
         self._eod_closed_insts: set[str] = set()       
         self._active_windows: dict[str, dict] = {}     
 
         # 轨道 A (Fixed Grid) 的最高水位线追仓配置
         self._addon_window_min = ADDON_WINDOW_MIN                   
-        self._current_slot_start_min = None          
+        self._slot_start_min_by_inst: dict[str, int] = {}
         self._slot_extreme_signals: dict[str, float] = {} 
         self._slot_target_lots: dict[str, int] = {}  # 💡 记录当前窗格累计下达的目标持仓
 
@@ -531,61 +368,65 @@ class IndexIntradayStrategy(Strategy):
             self._eod_closed_insts.clear()
             self._active_windows.clear()
             self._slot_target_lots.clear()
-            self._last_minute = None
-            self._last_slot = None
-            self._current_slot_start_min = None  
+            self._last_minute_by_inst.clear()
+            self._last_slot_by_inst.clear()
+            self._slot_start_min_by_inst.clear()
 
-        if self._last_minute is None or minute_of_day != self._last_minute:
-            self._last_minute = minute_of_day
-            self._evaluate_minute_logic(day_ordinal, minute_of_day, cn_seconds)
+        prefix_match = re.match(r"^([A-Za-z]+)", inst_str)
+        prefix = prefix_match.group(1).upper() if prefix_match else ""
+        parquet_inst = self._prefix_to_parquet.get(prefix)
+        if parquet_inst and self._active_contract.get(prefix) == inst_str:
+            minute_key = (day_ordinal, minute_of_day)
+            if self._last_minute_by_inst.get(inst_str) != minute_key:
+                self._last_minute_by_inst[inst_str] = minute_key
+                self._evaluate_minute_logic(
+                    prefix, parquet_inst, inst_str, day_ordinal, minute_of_day, cn_seconds
+                )
 
         self._check_gtq(inst_str, depth)
 
     # ============================================================
     # 双轨制调度中心
     # ============================================================
-    def _evaluate_minute_logic(self, day_ordinal: int, minute_of_day: int, cn_seconds: int):
+    def _evaluate_minute_logic(self, prefix: str, parquet_inst: str, active_inst: str,
+                               day_ordinal: int, minute_of_day: int, cn_seconds: int):
         # ── 1. 14:30 以后强制全平 (股指规则) ──
         if minute_of_day >= 870:
-            for prefix, parquet_inst in self._prefix_to_parquet.items():
-                active_inst = self._active_contract.get(prefix)
-                if active_inst and active_inst not in self._eod_closed_insts:
-                    depth = self._latest_depth.get(active_inst)
-                    if depth:
-                        self._eod_closed_insts.add(active_inst)
-                        self._active_windows.pop(active_inst, None)
-                        current_lots = self._get_current_lots(active_inst)
-                        self.log.info(f"⚙ REBAL {prefix} [EOD FLAT] cur={current_lots}")
-                        
-                        self._cancel_all_gtds(active_inst)
-                        if current_lots != 0:
-                            side = OrderSide.SELL if current_lots > 0 else OrderSide.BUY
-                            self._issue_order(active_inst, abs(current_lots), side, depth, 0)
+            if active_inst not in self._eod_closed_insts:
+                depth = self._latest_depth.get(active_inst)
+                if depth:
+                    self._eod_closed_insts.add(active_inst)
+                    self._active_windows.pop(active_inst, None)
+                    current_lots = self._get_current_lots(active_inst)
+                    self.log.info(f"⚙ REBAL {prefix} [EOD FLAT] cur={current_lots}")
+
+                    self._cancel_all_gtds(active_inst)
+                    if current_lots != 0:
+                        side = OrderSide.SELL if current_lots > 0 else OrderSide.BUY
+                        self._issue_order(active_inst, abs(current_lots), side, depth, 0)
             return
 
         # ── 2. 正常交易时段 (股指 09:31 - 14:29) ──
         if 571 <= minute_of_day < 870:
             if self._mapping_type in ["zscore", "robust"]:
                 slot = day_ordinal * 48 + minute_of_day // 30
-                is_new_slot = (self._last_slot is None or slot != self._last_slot)
+                is_new_slot = self._last_slot_by_inst.get(active_inst) != slot
                 
                 if is_new_slot:
-                    self._last_slot = slot
-                    self._current_slot_start_min = minute_of_day
-                    self._slot_extreme_signals.clear()
-                    
-                    for prefix, parquet_inst in self._prefix_to_parquet.items():
-                        if self._active_contract.get(prefix) in self._eod_closed_insts: continue
+                    self._last_slot_by_inst[active_inst] = slot
+                    self._slot_start_min_by_inst[active_inst] = minute_of_day
+                    self._slot_extreme_signals.pop(active_inst, None)
+
+                    if active_inst not in self._eod_closed_insts:
                         self._rebalance_fixed_grid(prefix, parquet_inst, day_ordinal, minute_of_day, is_new_slot=True)
                 else:
-                    if self._addon_window_min > 0 and (minute_of_day - self._current_slot_start_min) <= self._addon_window_min:
-                        for prefix, parquet_inst in self._prefix_to_parquet.items():
-                            if self._active_contract.get(prefix) in self._eod_closed_insts: continue
+                    slot_start = self._slot_start_min_by_inst.get(active_inst, minute_of_day)
+                    if self._addon_window_min > 0 and (minute_of_day - slot_start) <= self._addon_window_min:
+                        if active_inst not in self._eod_closed_insts:
                             self._rebalance_fixed_grid(prefix, parquet_inst, day_ordinal, minute_of_day, is_new_slot=False)
             
             elif self._mapping_type == "quantile":
-                for prefix, parquet_inst in self._prefix_to_parquet.items():
-                    if self._active_contract.get(prefix) in self._eod_closed_insts: continue
+                if active_inst not in self._eod_closed_insts:
                     self._rebalance_dynamic_event(prefix, parquet_inst, day_ordinal, minute_of_day, cn_seconds)
 
     # ============================================================
@@ -907,16 +748,11 @@ class IndexIntradayStrategy(Strategy):
 
 
 # ---- 5c. 品种注册 + 策略构造 ----
-def _make_instrument(futures_code: str) -> FuturesContract:
+def _make_instrument(futures_code: str, expiration_ns: int) -> FuturesContract:
     prefix_match = re.match(r"^([A-Za-z]+)", futures_code)
     prefix = prefix_match.group(1).upper() if prefix_match else ""
     multiplier, tick_size = INSTRUMENT_SPECS.get(prefix, (1, 0.01))
     price_inc = Price.from_str(str(tick_size))
-
-    code = futures_code[len(prefix):]
-    yy, mm = 2000 + int(code[:2]), int(code[2:4])
-    expiry_dt = datetime(yy, mm, 15, tzinfo=CN_TZ)
-    expiration_ns = int(expiry_dt.timestamp() * 1e9)
 
     # CFFEX 保证金 + 费率（2025）
     # spec: (保证金%, 开仓‱, 平今‱)  来源：中金所
@@ -1000,14 +836,7 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame):
         fee_model=CffexIndexFeeModel(cache=engine.cache),
     )
 
-    # ── 预注册所有合约 ──
-    registered = {}
-    for fc in sorted(all_futures):
-        instrument = _make_instrument(fc)
-        engine.add_instrument(instrument)
-        registered[fc] = f"{fc}.CFFEX"
-
-        # ── 多线程并行加载快照 ──
+    # ── 多线程并行加载快照 ──
     total_snaps = 0
     max_workers = min(os.cpu_count() or 4, 8)  # 最多 8 线程
     print(f"\n🚀 启动多线程加载 (Workers: {max_workers})...")
@@ -1027,6 +856,33 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame):
     # NautilusTrader 要求 add_data 的数据必须按时间严格递增
     # 所以必须对多线程乱序返回的结果，按日期重新排序！
     date_results.sort(key=lambda x: x[0])
+
+    # 合约到期时间取本次快照中该合约最后一笔数据，不再假定为合约月15日。
+    expiration_by_contract: dict[str, int] = {}
+    for _, snaps in date_results:
+        for inst_str, snap_list in snaps.items():
+            if not snap_list:
+                continue
+            futures_code = inst_str.rsplit(".", 1)[0]
+            last_ts = max(int(snap.ts_event) for snap in snap_list)
+            expiration_by_contract[futures_code] = max(
+                expiration_by_contract.get(futures_code, 0), last_ts
+            )
+
+    signal_expirations: dict[str, int] = {}
+    for futures_code, last_time in signals_df.groupby("futures_code")["index_time"].max().items():
+        ts = pd.Timestamp(last_time)
+        ts = ts.tz_localize(CN_TZ) if ts.tzinfo is None else ts.tz_convert(CN_TZ)
+        signal_expirations[str(futures_code)] = int((ts + pd.Timedelta(minutes=1)).timestamp() * 1e9) - 1
+
+    registered = {}
+    for fc in sorted(all_futures):
+        expiration_ns = expiration_by_contract.get(fc, 0) or signal_expirations.get(fc, 0)
+        if expiration_ns <= 0:
+            raise ValueError(f"无法从快照或信号推导合约 {fc} 的到期时间")
+        instrument = _make_instrument(fc, expiration_ns)
+        engine.add_instrument(instrument)
+        registered[fc] = f"{fc}.CFFEX"
     
     print("\n💿 正在将排序后的数据注入引擎...")
     for date_str, snaps in date_results:
@@ -1157,29 +1013,21 @@ def _print_multi_day_performance(engine, strategy, registered):
 if __name__ == "__main__":
     import sys
 
-    train_only = "--train-only" in sys.argv
-    backtest_only = "--backtest-only" in sys.argv
     snapshot_date = "20251231"
+    signal_path = SIGNALS_PATH
     for a in sys.argv:
         if a.startswith("--date="):
             snapshot_date = a.split("=", 1)[1]
+        elif a.startswith("--signals="):
+            signal_path = a.split("=", 1)[1]
 
-    # ═══ 阶段 1: 训练 ═══
-    if not backtest_only:
-        print("=" * 80)
-        print("阶段 1: 训练 LightGBM & 生成 OOS 信号")
-        print("=" * 80)
-        signals_df = train_and_generate_signals()
-    else:
-        print("📂 加载已有信号文件 ...")
-        signals_df = pd.read_parquet(SIGNALS_OUT)
-        print(f"   加载: {len(signals_df):,} 行")
+    print("📂 加载外部信号文件 ...")
+    signals_df = load_signal_source(signal_path)
+    print(f"   加载: {len(signals_df):,} 行 | {signal_path}")
 
-    # ═══ 阶段 2: NautilusTrader 回测 ═══
-    if not train_only:
-        print("\n" + "=" * 80)
-        print("阶段 2: NautilusTrader 回测")
-        print("=" * 80)
-        run_nt_backtest_multi_day(signals_df)
+    print("\n" + "=" * 80)
+    print("NautilusTrader 回测")
+    print("=" * 80)
+    run_nt_backtest_multi_day(signals_df)
 
     print("\n✅ 全部完成")

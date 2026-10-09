@@ -10,8 +10,8 @@ import pyarrow.parquet as pq
 from itertools import product
 import matplotlib.pyplot as plt
 
-# 导入公司并行计算库与 partial
-from ahl.concurrent.futures import hpc_pool
+# 使用 Python 标准库在本机并行搜索
+from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import warnings
 warnings.filterwarnings('ignore')
@@ -40,11 +40,7 @@ COMM_RAW = EXCHANGE_PREFIXES['shfe'] + EXCHANGE_PREFIXES['dce'] + EXCHANGE_PREFI
 TARGET_POOL = list(set(COMM_RAW) - {'LC', 'EC', 'AO', 'BB', 'FB', 'WR', 'RS', 'BC', 'LU'})
 TARGET = "Ret_30m_Fwd"
 
-DATA_DIR = "/users/is/byang/projects/future_system/data"
 # 💡 超参搜索时，严格仅使用 2024 年数据，保留 2025 年为最终 OOS 盲测集
-PARQUET_2024 = f"{DATA_DIR}/factor_dataset_AllMarket_main_only_2024.parquet"
-MARKET_STATES_PATH = f"{DATA_DIR}/best_market_states_list.json"
-CFFEX_RAW = ['C1000Z', 'C500Z', 'CSZ', 'SS50Z']
 
 # =========================================================
 # ⏱️ 2. 全市场高精度时间清洗函数
@@ -158,7 +154,7 @@ print(f"⏱️ 2024 样本内全局切分日期: {split_date}")
 train_mask = df['index_time'].dt.date < split_date
 val_mask = df['index_time'].dt.date >= split_date
 
-# 转换为 np.float32 降低 Spark 网络序列化负担
+# 转换为 np.float32 降低本地进程间序列化负担
 X_train = df.loc[train_mask, features].values.astype(np.float32)
 y_train = df.loc[train_mask, TARGET].values.astype(np.float32)
 X_test = df.loc[val_mask, features].values.astype(np.float32)
@@ -188,14 +184,14 @@ param_grid = {
 param_names = list(param_grid.keys())
 param_list = [dict(zip(param_names, combo)) for combo in product(*param_grid.values())]
 
-print(f"\n🔍 共 {len(param_list)} 组超参数组合待搜索，准备提交至 Spark 集群...")
+print(f"\n🔍 共 {len(param_list)} 组超参数组合待搜索，准备提交至本地进程池...")
 print("=" * 80)
 
 # =======================================================
-# 8. 定义 Spark Worker 并行训练函数
+# 8. 定义本地 Worker 并行训练函数
 # =======================================================
 def evaluate_params(params, x_train, y_train, x_test, y_test, v_df, target_col):
-    """ Spark Executor 节点上的独立函数 """
+    """本地子进程中的独立训练函数。"""
     import lightgbm as lgb
     import numpy as np
     import pandas as pd
@@ -255,15 +251,15 @@ worker_func = partial(evaluate_params,
                       v_df=val_df, target_col=TARGET)
 
 # =======================================================
-# 9. 启动 Spark 池并映射任务
+# 9. 启动本地进程池并映射任务
 # =======================================================
-print("🚀 正在提交 Spark 并行计算任务...")
+print("🚀 正在提交本地并行计算任务...")
 import multiprocessing
 max_workers = max(1, multiprocessing.cpu_count() - 2)
 print(f"🔥 启动本地多进程搜索 (Workers: {max_workers})...")
 with ProcessPoolExecutor(max_workers=max_workers) as pool:
     results = list(pool.map(worker_func, param_list))
-print("✅ Spark 集群计算完成！")
+print("✅ 本地并行计算完成！")
 
 # =======================================================
 # 10. 输出结果汇总与最优结果提取
@@ -273,7 +269,7 @@ display_results = [{k: v for k, v in r.items() if k != 'importances'} for r in r
 results_df = pd.DataFrame(display_results).sort_values('full_ic', ascending=False)
 
 print("\n" + "=" * 100)
-print(f"🏆 [TARGET POOL] 2024样本内 - Spark 搜索结果汇总（按 Pooled Full IC 降序）")
+print(f"🏆 [TARGET POOL] 2024样本内 - 本地搜索结果汇总（按 Pooled Full IC 降序）")
 print("=" * 100)
 pd.set_option('display.max_rows', 100)
 pd.set_option('display.width', 200)

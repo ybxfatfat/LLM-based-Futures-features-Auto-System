@@ -52,11 +52,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Add external projects to system path to ensure absolute imports resolve
 project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Imports from future_sim package (installed in Pegasus future_research)
-from tensor_context import GlobalTensorContext
-from dag_scheduler import DAGManager
-from batch_executor import BatchExecutor
+# Project-local GPU engine imports. Keeping these absolute makes imports
+# independent of whether the caller starts in the repository root or miner/.
+from minute_gpu_calculation.tensor_context import GlobalTensorContext
+from minute_gpu_calculation.dag_scheduler import DAGManager
+from minute_gpu_calculation.batch_executor import BatchExecutor
 
 
 class CPUAlphaProfiler:
@@ -469,7 +472,7 @@ _CURRENT_CACHED_UNIVERSE: str = "All"
 
 def get_or_create_global_context(focus_universe: str = "All") -> GlobalTensorContext:
     """
-    Instantiates or retrieves the cached GlobalTensorContext spanning 2025 (1-Year).
+    Instantiates or retrieves the cached GlobalTensorContext spanning 2024 (1-Year).
     Caches the loaded base tensors securely inside the GPU VRAM.
     """
     global _PERSISTENT_GLOBAL_CONTEXT, _CURRENT_CACHED_UNIVERSE
@@ -483,7 +486,7 @@ def get_or_create_global_context(focus_universe: str = "All") -> GlobalTensorCon
         torch.cuda.empty_cache()
         gc.collect()
 
-    logger.info(f"💾 [VRAM Cache Miss] Initializing persistent Futures High-Frequency GlobalTensorContext (1-Year Mode: 2025 | Universe: {focus_universe})...")
+    logger.info(f"💾 [VRAM Cache Miss] Initializing persistent Futures High-Frequency GlobalTensorContext (1-Year Mode: 2024 | Universe: {focus_universe})...")
     base_panel_dir = project_root / "data" / "intraday_parquet" / "base_panel"
 
     # Load validated instruments based on universe focus
@@ -504,9 +507,9 @@ def get_or_create_global_context(focus_universe: str = "All") -> GlobalTensorCon
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-    # 1-Month Time range setting for quick test: January 2025
-    target_start = "2025-01-08"
-    target_end = "2025-12-31"
+    # 2024 is the in-sample research period; 2025 remains untouched OOS.
+    target_start = "2024-01-08"
+    target_end = "2024-12-31"
     warm_up_days = 3
 
     logger.info(f"Loaded {len(panel_paths)} commodity instruments panels. Instantiating concurrent loaders on {device}...")
@@ -544,7 +547,7 @@ def clean_dynamic_vram_tensors(global_ctx: GlobalTensorContext, keep_features: l
 
     # 动态加载所有的额外物理基础字段，将它们加入白名单保护，绝不误删！
     try:
-        from libraries import load_extra_base_fields
+        from miner.libraries import load_extra_base_fields
         extra_feats = load_extra_base_fields()
         if extra_feats:
             base_features.update(extra_feats.keys())
@@ -872,9 +875,9 @@ def evaluate_factor_batch(factor_formulas: dict[str, str], focus_universe: str =
 
     # 3. Execute concurrently on GPU via BatchExecutor (Parallelizing all compiled nodes)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    # 1-Month Time range setting for quick test: January 2025
-    target_start = "2025-01-08"
-    target_end = "2025-12-31"
+    # Evaluate candidate formulas only on the 2024 in-sample research period.
+    target_start = "2024-01-08"
+    target_end = "2024-12-31"
 
     try:
         logger.info("⚡ [GPU Graph Execution] Running graph scheduling in parallel...")

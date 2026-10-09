@@ -384,7 +384,7 @@ class HighFreqMinuteFeatures(BaseTickFeature):
         dt = ce.IfElse((self.tick_amt_diff > c_0), self.tick_amt_diff, c_0)
         self.min_vol_sum.set_input(dv)
         
-        # 2. 高频主买/主卖分解 (严格保持原有牛逼算法不变)
+        # 2. 高频成交量方向归因
         tick_vwap = ce.IfElse((dv > c_0), dt / (dv * snp.contract_size), mid)
         
         max_ask = ce.IfElse((self.delay_ask1 > snp.ask_1_prc), self.delay_ask1, snp.ask_1_prc)
@@ -396,9 +396,11 @@ class HighFreqMinuteFeatures(BaseTickFeature):
         safe_denom_overlap = ce.IfElse((denom_overlap > c_0), denom_overlap, c_1e8)
         ratio_overlap = (tick_vwap - B_active) / safe_denom_overlap
         
-        denom_fallback = snp.ask_1_prc - snp.bid_1_prc
+        # 前后报价区间不重叠或仅接触时，使用成交发生前的上一快照盘口。
+        # 当前盘口可能已经包含该段成交造成的重定价，直接用它插值可能反转成交方向。
+        denom_fallback = self.delay_ask1 - self.delay_bid1
         safe_denom_fallback = ce.IfElse((denom_fallback > c_0), denom_fallback, c_1e8)
-        ratio_fallback = (tick_vwap - snp.bid_1_prc) / safe_denom_fallback
+        ratio_fallback = (tick_vwap - self.delay_bid1) / safe_denom_fallback
 
         cond_pure_buy = (tick_vwap >= max_ask)
         cond_pure_sell = (tick_vwap <= min_bid)
@@ -766,27 +768,25 @@ def get_date_from_filename(filename: str) -> str:
     return match.group(1) if match else None
 
 
-def run_local_multiprocessing(tasks: list, max_workers: int = 4):
+def run_local_multiprocessing(tasks: list, max_workers: int = 4) -> list[str]:
     print(f"🚀 启动本地多进程模式 (核心数: {max_workers})...")
-    results = []
+    output_paths: list[str] = []
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        for i, res_df in enumerate(executor.map(process_single_task, tasks)):
-            
-            # 💥 极度关键的过滤：不仅要判断 empty，还要判断是否只返回了列名没数据！
-            if res_df is not None and not res_df.empty and len(res_df) > 0:
-                results.append(res_df)
+        for i, output_path in enumerate(executor.map(process_single_task, tasks)):
+            # Worker 已经将结果落盘，父进程只收集有效文件路径，
+            # 避免将整年 DataFrame 重新汇总到主进程。
+            if output_path is not None and os.path.isfile(output_path):
+                output_paths.append(output_path)
                 
             if (i + 1) % 10 == 0:
                 print(f"   已完成 {i+1}/{len(tasks)} 个交易日...")
                 
-    # 严格判断，避免把一个全空的列表传给 pd.concat
-    if len(results) == 0:
+    if not output_paths:
         print("\n⚠️ 警告：所有交易日的结果全为空！请检查上面的 Worker 报错日志！")
-        return pd.DataFrame()
-        
-    # 只有当 results 里全是实打实的、有数据的 DataFrame 时，才执行 concat！
-    return pd.concat(results, ignore_index=True)
+        return []
+
+    return output_paths
 
 
 # ======================================================================

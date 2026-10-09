@@ -11,9 +11,9 @@ from pathlib import Path
 # ==========================================
 st.set_page_config(page_title="AlphaMiner Pro Dashboard", layout="wide")
 
-# 强制使用动态绝对路径读取大文件（完全绕过浏览器上传限制）
+# 使用动态绝对路径读取本地评测结果
 project_root = Path(__file__).resolve().parent.parent
-DEFAULT_JSON_PATH = str(project_root / "data" / "feature_quality_dashboard_2025.json")
+DEFAULT_JSON_PATH = str(project_root / "data" / "feature_quality_dashboard_2024.json")
 
 # 用于区分品种属于哪个池子的通用常量集合 (已脱敏为标准代码)
 CFFEX_INSTS = {'IC', 'IF', 'IH', 'IM'}

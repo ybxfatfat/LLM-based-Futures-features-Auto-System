@@ -517,8 +517,8 @@ def run_backtest(df_in, feature_name, eval_start, eval_end, windows=[2000]):
 
         df_bt['pooled_mean'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).mean().values
         df_bt['pooled_std'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).std().values
-        df_bt['pooled_qhigh'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).quantile(Q_UPPER).values
-        df_bt['pooled_qlow'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).quantile(Q_LOWER).values
+        df_bt['pooled_qhigh'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).quantile(Q_UPPER_LOCK).values
+        df_bt['pooled_qlow'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).quantile(Q_LOWER_LOCK).values
         df_bt['pooled_q95'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).quantile(0.95).values
         df_bt['pooled_q05'] = f_series.rolling(pooled_w, min_periods=pooled_w//2).quantile(0.05).values
 

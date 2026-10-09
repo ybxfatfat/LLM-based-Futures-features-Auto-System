@@ -8,7 +8,7 @@ Selection Criteria for these examples:
   - Built heavily upon Custom Base Fields (e.g., BuyRatio, MaxConsecUpAmp, ExpOBI)
   - Strong Economic Intuition (Clear Counterparty & Mechanism)
   - Strict Mathematical Elegance (No deep nesting, no curve-fitted magic constants)
-  - Robust OOS Metrics (Full Year IC > 0.03, Ann IR > 2.0)
+  - Illustrative in-sample 2024 diagnostics (|Full Year IC| > 0.03, |Ann IR| > 2.0)
 """
 
 # ======================================================================

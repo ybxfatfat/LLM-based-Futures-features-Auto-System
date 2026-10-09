@@ -298,7 +298,11 @@ class TsRank(StatefulGPUOperator):
         curr_x = x.unsqueeze(-1)
         greater_count = torch.sum(curr_x > view, dim=-1, dtype=torch.float32)
         # 【修复】：将 valid_count 改为 valid_cnt
-        return torch.where(valid_cnt >= min_periods, greater_count / (valid_cnt - 1.0 + 1e-8), torch.tensor(float('nan'), device=x.device))
+        return torch.where(
+            (valid_cnt >= min_periods) & ~torch.isnan(x),
+            greater_count / (valid_cnt - 1.0 + 1e-8),
+            torch.tensor(float('nan'), device=x.device),
+        )
 
 # ======================================================================
 # 4. 高阶统计与衰减算子

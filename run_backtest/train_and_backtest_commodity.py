@@ -1,62 +1,35 @@
 """
 =====================================================
-1. 加载 parquet 因子数据 → 洗盘(过滤非交易时段) → 训练 LightGBM → 生成样本外 (OOS) 信号
-2. NautilusTrader 正式回测：支持 Fixed Grid (最高水位线追加) 与 Dynamic Event (动态沙漏)
+读取外部生成的目标仓位信号，执行 NautilusTrader 商品期货回测。
 
-池子: 全市场商品期货 (精准匹配 2025 年固定/比例双轨手续费)
+池子: 全市场商品期货 (2025 年公开费率表的固定/比例双轨基准)
 使用:
-    python train_and_backtest_commodity.py                          # 全量
-    python train_and_backtest_commodity.py --train-only             # 只训练
-    python train_and_backtest_commodity.py --backtest-only          # 只回测
+    python train_and_backtest_commodity.py                          # 使用默认信号文件
+    python train_and_backtest_commodity.py --signals=/path/to/signals.parquet
 """
 
 import os
 import re
 import glob
 import gc
-import json
-import pickle
+from bisect import bisect_right
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
-import pyarrow.parquet as pq
-from scipy.stats import spearmanr
 from decimal import Decimal
 
 # ═══════════════════════════════════════════════════════════════
 # 0. 配置常量
 # ═══════════════════════════════════════════════════════════════
 
-LGB_PARAMS = dict(
-    n_estimators=5000,
-    objective="regression",
-    metric="rmse",
-    learning_rate=0.01,
-    max_depth=12,
-    num_leaves=63,
-    feature_fraction=0.8,
-    bagging_fraction=0.7,
-    bagging_freq=5,
-    n_jobs=-1,
-    random_state=42,
-    verbose=-1,
-)
-
 CN_TZ = timezone(timedelta(hours=8))
 
 from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 DATA_DIR = str(project_root / "data")
-PARQUET_PATH = f"{DATA_DIR}/factor_dataset_AllMarket_main_only_2025.parquet"
-
-TARGET = "Ret_30m_Fwd"
-
 # ---- 策略参数 ----
-ZSCORE_LOOKBACK = 2000       
-ZSCORE_CLIP = 3.0            
 MAX_WEIGHT_PER_INST = 1.0    
 TOTAL_CAPITAL = 10_000_000   
 REBALANCE_INTERVAL_MIN = 30  
@@ -73,20 +46,28 @@ MAPPING_TYPE = "zscore"
 POOL_NAME = "ferrous"
 
 POOL_CONFIG = {
-    "precious":     {"pool": ['GL', 'SL']},  # 标准代号替代 GLZ, SLZ
+    "precious":     {"pool": ['AU', 'AG']},
     "non_ferrous":  {"pool": ['AL', 'CU', 'ZN', 'PB', 'NI', 'SN', 'SS', 'BC', 'LC']},
     "ferrous":      {"pool": ['RB', 'HC', 'I', 'J', 'JM', 'SM', 'SF']},
     "chemicals":    {"pool": ['RU', 'BU', 'TA', 'MA', 'EG', 'PP', 'L', 'V', 'EB', 'UR', 'SA', 'FG', 'BR', 'FU', 'LU', 'NR', 'SC', 'EC']}
 }
 COMM_POOL = POOL_CONFIG[POOL_NAME]["pool"]
 
-FEATURES_PATH = f"{DATA_DIR}/best_features_{POOL_NAME}.json"
-SIGNALS_OUT = f"{DATA_DIR}/oos_signals_{POOL_NAME}.parquet"
-MODEL_OUT = f"{DATA_DIR}/lgb_model_{POOL_NAME}.pkl"
+SIGNALS_PATH = f"{DATA_DIR}/oos_signals_{POOL_NAME}.parquet"
 
+# 夜盘收盘分钟：跨零点品种用 60/150，当日收盘品种用 1380(23:00)。
+# 不在表内的品种视为无夜盘，不再统一假定为 02:30 收盘。
 NIGHT_CLOSE_MINS = {
-    'AG': 150, 'AU': 150, 'SC': 150, 
-    'CU': 60, 'AL': 60, 'ZN': 60, 'PB': 60, 'NI': 60, 'SN': 60, 'SS': 60, 'BC': 60,
+    'AG': 150, 'AU': 150, 'SC': 150,
+    'AL': 60, 'AO': 60, 'CU': 60, 'ZN': 60, 'PB': 60,
+    'NI': 60, 'SN': 60, 'SS': 60, 'BC': 60,
+    'BR': 1380, 'BU': 1380, 'FU': 1380, 'HC': 1380, 'RB': 1380,
+    'RU': 1380, 'SP': 1380, 'NR': 1380, 'LU': 1380,
+    'A': 1380, 'B': 1380, 'C': 1380, 'CS': 1380, 'EB': 1380,
+    'EG': 1380, 'I': 1380, 'J': 1380, 'JM': 1380, 'L': 1380,
+    'M': 1380, 'P': 1380, 'PG': 1380, 'PP': 1380, 'V': 1380, 'Y': 1380,
+    'CF': 1380, 'FG': 1380, 'MA': 1380, 'OI': 1380, 'PF': 1380,
+    'RM': 1380, 'SA': 1380, 'SR': 1380, 'TA': 1380,
 }
 
 # 规格表: (乘数, tick_size, 交易所, 保证金率, 计费模式, 费率数值)
@@ -159,191 +140,63 @@ INSTRUMENT_SPECS = {
     'LC': (1, 50.0, 'GFEX', 0.15, 'ratio', 0.00008),   # 万0.8
 }
 
+# 2025 年公开费率表中与开仓/平昨不同的平今费率。
+# 未列出的品种三者使用 INSTRUMENT_SPECS 中的基准费率。
+CLOSE_TODAY_FEE_OVERRIDES_2025 = {
+    'AU': ('fixed', 0.0),
+    'BU': ('ratio', 0.0),
+    'CU': ('ratio', 0.0001),
+    'FU': ('ratio', 0.0),
+    'PB': ('ratio', 0.0),
+    'RU': ('fixed', 0.0),
+    'SP': ('ratio', 0.0),
+    'SS': ('fixed', 0.0),
+    'WR': ('ratio', 0.0),
+    'ZN': ('fixed', 0.0),
+    'J': ('ratio', 0.00014),
+    'LH': ('ratio', 0.0002),
+    'CF': ('fixed', 0.0),
+    'PF': ('fixed', 0.0),
+    'SF': ('fixed', 0.0),
+    'SM': ('fixed', 0.0),
+    'SR': ('fixed', 0.0),
+    'TA': ('fixed', 0.0),
+    'BC': ('ratio', 0.0),
+    'NR': ('fixed', 0.0),
+    'SC': ('fixed', 0.0),
+}
 
-# ═══════════════════════════════════════════════════════════════
-# 2. 工具函数与时段洗盘
-# ═══════════════════════════════════════════════════════════════
-
-def parquet_contract_to_futures(prefix: str, contract: str) -> str:
-    """parquet 合约 'YYYYMM' → 期货代码 'PREFIXYYM'"""
-    yy = contract[2:4]
-    mm = contract[4:6]
-    return f"{prefix}{yy}{mm}"
-
-def filter_global_trading_hours(df: pd.DataFrame) -> pd.DataFrame:
-    print(f"执行全市场交易时段清洗前: {len(df)} 行")
-    time_str = df['index_time'].dt.strftime('%H:%M:%S')
-    
-    is_cffex = df['instrument'].isin(['IC', 'IF', 'IH', 'IM'])
-    mask_cffex = (
-        ((time_str >= '09:30:00') & (time_str <= '11:30:00')) |
-        ((time_str >= '13:00:00') & (time_str <= '15:00:00'))
-    )
-    
-    is_commodity = ~is_cffex
-    mask_comm_day = (
-        ((time_str >= '09:00:00') & (time_str <= '10:15:00')) |
-        ((time_str >= '10:30:00') & (time_str <= '11:30:00')) |
-        ((time_str >= '13:30:00') & (time_str <= '15:00:00'))
-    )
-    
-    group_0230 = {'AU', 'AG', 'SC'}
-    group_0100 = {'CU', 'AL', 'ZN', 'PB', 'NI', 'SN', 'SS', 'BC'}
-    group_no_night = {'WR', 'BB', 'FB', 'EG', 'LH', 'PK', 'AP', 'CJ', 'RS', 'SM', 'UR', 'LC', 'EC', 'PF'}
-    
-    mask_night_2300 = (time_str >= '21:00:00') & (time_str <= '23:00:00')
-    mask_night_0100 = (time_str >= '21:00:00') | (time_str <= '01:00:00')
-    mask_night_0230 = (time_str >= '21:00:00') | (time_str <= '02:30:00')
-
-    is_0230 = df['instrument'].isin(group_0230)
-    is_0100 = df['instrument'].isin(group_0100)
-    is_no_night = df['instrument'].isin(group_no_night)
-    is_2300 = ~(is_0230 | is_0100 | is_no_night | is_cffex)
-
-    mask_comm = mask_comm_day | (
-        (is_0230 & mask_night_0230) |
-        (is_0100 & mask_night_0100) |
-        (is_2300 & mask_night_2300)
-    )
-    
-    valid_mask = (is_cffex & mask_cffex) | (is_commodity & mask_comm)
-
-    df_clean = df[valid_mask].copy()
-    df_clean = df_clean.sort_values(['index_time', 'instrument', 'contract']).reset_index(drop=True)
-    
-    print(f"✅ 执行全市场清洗后: {len(df_clean)} 行")
-    return df_clean
-
-def load_features() -> list[str]:
-    with open(FEATURES_PATH, "r") as f:
-        data = json.load(f)
-    raw = data["Feature"] if isinstance(data, dict) and "Feature" in data else data
-    all_cols = pq.read_schema(PARQUET_PATH).names
-    features = [f for f in raw if f in all_cols]
-    print(f"✅ {len(features)}/{len(raw)} 特征可用")
-    return features
+# 大商所部分品种的“日内交易”费率同时适用于开仓和平今。
+# 开仓时尚不知是否会当日平仓，因此在平今成交时补收开仓侧差额。
+INTRADAY_OPEN_FEE_OVERRIDES_2025 = {
+    'J': ('ratio', 0.00014),
+    'LH': ('ratio', 0.0002),
+}
 
 
 # ═══════════════════════════════════════════════════════════════
-# 3. 训练 & 信号生成
+# 2. 信号加载
 # ═══════════════════════════════════════════════════════════════
 
-def train_and_generate_signals() -> pd.DataFrame:
-    features = load_features()
+def load_signal_source(path: str = SIGNALS_PATH) -> pd.DataFrame:
+    """读取模型流程预先生成的目标仓位信号，不在回测脚本中训练模型。"""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"找不到信号文件: {path}")
 
-    all_cols = ["index_time", "instrument", "contract", TARGET] + features
-    table = pq.read_table(
-        PARQUET_PATH, columns=[c for c in all_cols if c in pq.read_schema(PARQUET_PATH).names],
-        filters=[("instrument", "in", COMM_POOL)],
-    )
-    df = table.to_pandas()
-    df["index_time"] = pd.to_datetime(df["index_time"]).dt.tz_localize(CN_TZ)
-    df = df.dropna(subset=[TARGET]).sort_values("index_time").reset_index(drop=True)
+    signals_df = pd.read_parquet(path)
+    required = {"index_time", "instrument", "futures_code", f"tw_{MAPPING_TYPE}"}
+    missing = required.difference(signals_df.columns)
+    if missing:
+        raise ValueError(f"信号文件缺少必要字段: {sorted(missing)}")
 
-    df = filter_global_trading_hours(df)
-
-    print("\n⚙️ 正在计算目标波动率权重 (Sample Weights)...")
-    target_vol = df.groupby('instrument')[TARGET].transform(
-        lambda x: x.shift(30).rolling(2000, min_periods=100).std()
-    )
-    df['Weight'] = 1.0 / (target_vol + 1e-8)
-    df = df.dropna(subset=['Weight']).reset_index(drop=True)
-
-    print(f"📦 加载: {len(df):,} 行, {len(features)} 特征, {df['instrument'].nunique()} 品种")
-
-    split_idx = int(len(df) * 0.8)
-    oos_start_time = df.loc[split_idx, 'index_time']
-    print(f"⏱️ 切分点: {oos_start_time}（{split_idx:,}/{len(df):,}）")
-
-    # 💥 核心纠错：加入 30 个 bar 的 Embargo (隔离带) 防泄露
-    embargo_idx = split_idx - 30 
-    
-    X_train, y_train = df.iloc[:embargo_idx][features], df.iloc[:embargo_idx][TARGET]
-    w_train = df.iloc[:embargo_idx]['Weight']
-    X_test,  y_test  = df.iloc[split_idx:][features],  df.iloc[split_idx:][TARGET]
-
-    print("🧠 训练 带权重的 LightGBM ...")
-    model = lgb.LGBMRegressor(**LGB_PARAMS)
-    model.fit(
-        X_train, y_train,
-        sample_weight=w_train,  
-        eval_set=[(X_test, y_test)],
-        eval_metric="rmse",
-        callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=True)],
-    )
-    n_trees = model.best_iteration_ or model.n_estimators_
-
-    with open(MODEL_OUT, "wb") as f:
-        pickle.dump(model, f)
-    print(f"💾 模型: {MODEL_OUT}")
-
-    df["Pred"] = model.predict(df[features])
-
-    df_train = df.iloc[:split_idx]
-    inst_directions = {}
-    for inst in df_train['instrument'].unique():
-        sub = df_train[df_train['instrument'] == inst].dropna(subset=['Pred', TARGET])
-        inst_directions[inst] = 1.0 if (len(sub) >= 100 and sub['Pred'].corr(sub[TARGET]) >= 0) else -1.0
-    print(f"📌 方向(基于训练集): {inst_directions}")
-
-    oos = df.iloc[split_idx:].copy()
-    full_ic, _ = spearmanr(oos["Pred"], oos[TARGET])
-    oos["Date"] = oos["index_time"].dt.date
-    daily_ic = oos.groupby("Date").apply(
-        lambda x: spearmanr(x["Pred"], x[TARGET])[0] if len(x) > 20 else np.nan
-    ).dropna()
-    mean_ic = daily_ic.mean()
-    ir = mean_ic / daily_ic.std() * np.sqrt(252) if daily_ic.std() > 0 else 0
-    print(f"📊 OOS: Full IC={full_ic:.5f}, Mean Daily IC={mean_ic:.5f}, IR={ir:.3f}, Trees={n_trees}")
-
-    print(f"🔮 生成 OOS 信号 (全量 warm-up, lookback={ZSCORE_LOOKBACK}) ...")
-    parts = []
-    for inst in COMM_POOL:
-        prefix = inst
-        all_data = df[df["instrument"] == inst].copy()
-        
-        r = all_data["Pred"].rolling(ZSCORE_LOOKBACK, min_periods=ZSCORE_LOOKBACK // 2)
-        m = r.mean()
-        s = r.std()
-        q75, q25 = r.quantile(0.75), r.quantile(0.25)
-        q95, q05 = r.quantile(0.95), r.quantile(0.05)
-
-        all_data["zscore"]   = (all_data["Pred"] / (s + 1e-8)).fillna(0)
-        all_data["tw_zscore"] = np.clip(all_data["zscore"] / ZSCORE_CLIP, -1.0, 1.0)
-
-        all_data["robust_z"] = (all_data["Pred"] / ((q75 - q25) / 1.349 + 1e-8)).fillna(0)
-        all_data["tw_robust"] = np.clip(all_data["robust_z"] / ZSCORE_CLIP, -1.0, 1.0)
-
-        all_data["tw_quantile"] = np.where(
-            (all_data["Pred"] > q95) & (all_data["Pred"] > 0), 1.0,
-            np.where((all_data["Pred"] < q05) & (all_data["Pred"] < 0), -1.0, 0.0)
-        )
-
-        direction = inst_directions.get(inst, 1.0)
-        all_data["tw_zscore"] *= direction
-        all_data["tw_robust"] *= direction
-        all_data["tw_quantile"] *= direction
-
-        all_data["raw_signal"] = all_data["Pred"]
-        all_data["futures_code"] = all_data["contract"].apply(
-            lambda c: parquet_contract_to_futures(prefix, str(c))
-        )
-
-        oos_only = all_data[all_data["index_time"] >= oos_start_time].copy()
-        keep = ["index_time", "instrument", "contract", "futures_code",
-                "raw_signal", "tw_zscore", "tw_robust", "tw_quantile"]
-        parts.append(oos_only[keep])
-
-    signals_df = pd.concat(parts, ignore_index=True)
-    signals_df = signals_df.sort_values(["futures_code", "index_time"]).reset_index(drop=True)
-    signals_df.to_parquet(SIGNALS_OUT, index=False)
-    print(f"💾 信号: {SIGNALS_OUT} ({len(signals_df):,} 行)")
-    print(f"   OOS 期间: {signals_df['index_time'].min()} → {signals_df['index_time'].max()}")
-    return signals_df
-
+    signals_df["index_time"] = pd.to_datetime(signals_df["index_time"])
+    signals_df = signals_df[signals_df["instrument"].isin(COMM_POOL)].copy()
+    if signals_df.empty:
+        raise ValueError(f"信号文件中没有商品池 {POOL_NAME!r} 对应的数据")
+    return signals_df.sort_values(["futures_code", "index_time"]).reset_index(drop=True)
 
 # ═══════════════════════════════════════════════════════════════
-# 4. 信号索引
+# 3. 信号索引
 # ═══════════════════════════════════════════════════════════════
 
 def build_signal_index(signals_df: pd.DataFrame):
@@ -368,7 +221,7 @@ def build_signal_index(signals_df: pd.DataFrame):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 5. NautilusTrader 回测环境与费率
+# 4. NautilusTrader 回测环境与费率
 # ═══════════════════════════════════════════════════════════════
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
@@ -388,31 +241,114 @@ from nautilus_trader.backtest.models.fee import FeeModel
 
 
 class UniversalFuturesFeeModel(FeeModel):
-    """支持固定金额/万分比混排的商品期货终极费率模型"""
-    def __init__(self, cache=None):
+    """按开仓、平昨、平今分别计费，同时支持固定金额和成交额比例。"""
+    def __init__(self, cache=None, trading_day: str | None = None):
         super().__init__()
         self._cache = cache
+        self._trading_day = (
+            datetime.strptime(str(trading_day), "%Y%m%d").date().toordinal()
+            if trading_day is not None else 0
+        )
+        self._inventory: dict[str, dict[str, object]] = {}
+
+    @staticmethod
+    def _fee_amount(rule, qty: float, fill_px: float, multiplier: float) -> float:
+        fee_type, fee_val = rule
+        if fee_type == "ratio":
+            return multiplier * qty * fill_px * float(fee_val)
+        return qty * float(fee_val)
+
+    @staticmethod
+    def _consume_today_lots(lots: list[list[float]], qty: float) -> tuple[float, float]:
+        """按开仓顺序消耗今仓，返回 (平今手数, 开仓价×手数) 以补算日内开仓费率。"""
+        consumed = 0.0
+        price_qty = 0.0
+        remaining = qty
+        while remaining > 0 and lots:
+            lot_qty, lot_px = lots[0]
+            take = min(remaining, lot_qty)
+            consumed += take
+            price_qty += take * lot_px
+            remaining -= take
+            lot_qty -= take
+            if lot_qty <= 1e-12:
+                lots.pop(0)
+            else:
+                lots[0][0] = lot_qty
+        return consumed, price_qty
 
     def get_commission(self, order, fill_qty, fill_px, instrument):
         futures_code = instrument.raw_symbol.value
         prefix_match = re.match(r"^([A-Za-z]+)", futures_code)
         prefix = prefix_match.group(1).upper() if prefix_match else ""
-        
-        # 获取配置：(乘数, tick_size, 交易所, 保证金率, 计费模式, 费率数值)
+
         spec = INSTRUMENT_SPECS.get(prefix)
         if spec:
-            fee_type, fee_val = spec[4], spec[5]
+            base_rule = (spec[4], spec[5])
         else:
-            fee_type, fee_val = "ratio", 0.0001
-        
-        if fee_type == "ratio":
-            # 比例收费: 名义本金 × 万分比
-            notional = instrument.multiplier.as_double() * fill_qty.as_double() * fill_px.as_double()
-            commission = notional * float(fee_val)
-        else: 
-            # 固定收费: 手数 × 固定金额
-            commission = fill_qty.as_double() * float(fee_val)
-            
+            base_rule = ("ratio", 0.0001)
+
+        inst_key = str(instrument.id)
+        state = self._inventory.setdefault(inst_key, {
+            "trading_day": self._trading_day,
+            "long_today": 0.0,
+            "long_yesterday": 0.0,
+            "short_today": 0.0,
+            "short_yesterday": 0.0,
+            "long_today_lots": [],
+            "short_today_lots": [],
+        })
+
+        qty = fill_qty.as_double()
+        close_today_qty = 0.0
+        close_yesterday_qty = 0.0
+        open_qty = 0.0
+        close_today_open_price_qty = 0.0
+
+        # 交易所费用口径按“先平今、再平昨”拆分同一笔成交；反向超出部分计为新开仓。
+        if order.side == OrderSide.BUY:
+            close_today_qty, close_today_open_price_qty = self._consume_today_lots(
+                state["short_today_lots"], qty
+            )
+            state["short_today"] -= close_today_qty
+            remaining = qty - close_today_qty
+            close_yesterday_qty = min(remaining, state["short_yesterday"])
+            state["short_yesterday"] -= close_yesterday_qty
+            open_qty = remaining - close_yesterday_qty
+            state["long_today"] += open_qty
+            if open_qty > 0:
+                state["long_today_lots"].append([open_qty, fill_px.as_double()])
+        else:
+            close_today_qty, close_today_open_price_qty = self._consume_today_lots(
+                state["long_today_lots"], qty
+            )
+            state["long_today"] -= close_today_qty
+            remaining = qty - close_today_qty
+            close_yesterday_qty = min(remaining, state["long_yesterday"])
+            state["long_yesterday"] -= close_yesterday_qty
+            open_qty = remaining - close_yesterday_qty
+            state["short_today"] += open_qty
+            if open_qty > 0:
+                state["short_today_lots"].append([open_qty, fill_px.as_double()])
+
+        close_today_rule = CLOSE_TODAY_FEE_OVERRIDES_2025.get(prefix, base_rule)
+        intraday_open_rule = INTRADAY_OPEN_FEE_OVERRIDES_2025.get(prefix, base_rule)
+        multiplier = instrument.multiplier.as_double()
+        px = fill_px.as_double()
+        intraday_open_adjustment = 0.0
+        if close_today_qty > 0:
+            avg_open_px = close_today_open_price_qty / close_today_qty
+            intraday_open_adjustment = (
+                self._fee_amount(intraday_open_rule, close_today_qty, avg_open_px, multiplier)
+                - self._fee_amount(base_rule, close_today_qty, avg_open_px, multiplier)
+            )
+        commission = (
+            self._fee_amount(base_rule, open_qty, px, multiplier)
+            + self._fee_amount(base_rule, close_yesterday_qty, px, multiplier)
+            + self._fee_amount(close_today_rule, close_today_qty, px, multiplier)
+            + intraday_open_adjustment
+        )
+
         return Money(commission, instrument.quote_currency)
 
 
@@ -483,9 +419,10 @@ def load_snapshots_from_files(
                     bids.append(BookOrder(OrderSide.BUY, Price.from_str(str(bp)), Quantity.from_str(str(int(bq))), 0))
                     asks.append(BookOrder(OrderSide.SELL, Price.from_str(str(ap)), Quantity.from_str(str(int(aq))), 0))
                     b_cts.append(0); a_cts.append(0)
-                zero = BookOrder(OrderSide.BUY, Price.from_str("0"), Quantity.from_str("0"), 0)
+                zero_bid = BookOrder(OrderSide.BUY, Price.from_str("0"), Quantity.from_str("0"), 0)
+                zero_ask = BookOrder(OrderSide.SELL, Price.from_str("0"), Quantity.from_str("0"), 0)
                 for _ in range(6, 11):
-                    bids.append(zero); asks.append(zero)
+                    bids.append(zero_bid); asks.append(zero_ask)
                     b_cts.append(0); a_cts.append(0)
                 snaps.append(OrderBookDepth10(
                     InstrumentId.from_str(inst_str), bids, asks, b_cts, a_cts, 0, 0, ts_ns, ts_ns
@@ -535,7 +472,7 @@ class CommodityIntradayStrategy(Strategy):
         self.minute_idx = minute_idx
         self.daily_active = daily_active
         self._all_instruments = all_instruments
-        self._prefix_to_parquet = COMMODITY_MAPPING 
+        self._prefix_to_parquet = {inst: inst for inst in COMM_POOL}
 
         self._mapping_type = mapping_type
         self._mapping_field = f"tw_{mapping_type}"
@@ -544,16 +481,16 @@ class CommodityIntradayStrategy(Strategy):
         self._next_day_contract: dict[str, str] = {}   
 
         # 基础状态控制
-        self._current_day_ordinal: Optional[int] = None
-        self._last_minute: Optional[int] = None        
-        self._last_slot: Optional[int] = None          
+        self._session_day_by_prefix: dict[str, int] = {}
+        self._last_minute_by_inst: dict[str, tuple[int, int]] = {}
+        self._last_slot_by_inst: dict[str, int] = {}
         
         self._eod_closed_insts: set[str] = set()       
         self._active_windows: dict[str, dict] = {}     
 
         # 轨道 A (Fixed Grid) 的最高水位线追仓配置
         self._addon_window_min = ADDON_WINDOW_MIN                   
-        self._current_slot_start_min = None          
+        self._slot_start_min_by_inst: dict[str, int] = {}
         self._slot_extreme_signals: dict[str, float] = {} 
         self._slot_target_lots: dict[str, int] = {}  # 💡 记录当前窗格累计下达的目标持仓
 
@@ -563,6 +500,18 @@ class CommodityIntradayStrategy(Strategy):
 
         self._per_inst_capital = per_inst_capital
         self._commission_by_inst: dict[str, float] = {}
+        self._session_active: dict[tuple[str, int], str] = {}
+        for (inst, calendar_day, minute_of_day), signal in minute_idx.items():
+            session_day = calendar_day + 1 if minute_of_day >= 21 * 60 else calendar_day
+            self._session_active.setdefault((inst, session_day), signal["futures_code"])
+        self._signal_days_by_inst: dict[str, list[int]] = {}
+        for inst, day_ordinal in daily_active:
+            self._signal_days_by_inst.setdefault(inst, []).append(day_ordinal)
+        for inst in self._signal_days_by_inst:
+            self._signal_days_by_inst[inst] = sorted(set(self._signal_days_by_inst[inst]))
+        self._signal_day_sets_by_inst = {
+            inst: set(days) for inst, days in self._signal_days_by_inst.items()
+        }
 
     def on_start(self) -> None:
         for inst_str in self._all_instruments:
@@ -588,92 +537,96 @@ class CommodityIntradayStrategy(Strategy):
         day_ordinal = cn_seconds // self._SEC_PER_DAY + self._EPOCH_ORDINAL
         minute_of_day = (cn_seconds % self._SEC_PER_DAY) // 60  
 
-        if self._current_day_ordinal != day_ordinal:
-            self._on_new_day(day_ordinal)
-            self._current_day_ordinal = day_ordinal
-            self._eod_closed_insts.clear()
-            self._active_windows.clear()
-            self._slot_target_lots.clear()
-            self._last_minute = None
-            self._last_slot = None
-            self._current_slot_start_min = None  
+        prefix_match = re.match(r"^([A-Za-z]+)", inst_str)
+        prefix = prefix_match.group(1).upper() if prefix_match else ""
+        parquet_inst = self._prefix_to_parquet.get(prefix)
+        if parquet_inst:
+            session_day = day_ordinal + 1 if minute_of_day >= 21 * 60 else day_ordinal
+            if self._session_day_by_prefix.get(prefix) != session_day:
+                self._on_new_session(prefix, day_ordinal, session_day)
 
-        if self._last_minute is None or minute_of_day != self._last_minute:
-            self._last_minute = minute_of_day
-            self._evaluate_minute_logic(day_ordinal, minute_of_day, cn_seconds)
+            if self._active_contract.get(prefix) == inst_str:
+                minute_key = (day_ordinal, minute_of_day)
+                if self._last_minute_by_inst.get(inst_str) != minute_key:
+                    self._last_minute_by_inst[inst_str] = minute_key
+                    self._evaluate_minute_logic(
+                        prefix, parquet_inst, inst_str, day_ordinal, minute_of_day, cn_seconds
+                    )
 
         self._check_gtq(inst_str, depth)
 
     # ============================================================
     # 双轨制调度中心
     # ============================================================
-    def _evaluate_minute_logic(self, day_ordinal: int, minute_of_day: int, cn_seconds: int):
-        import datetime as pydt
-        d_date = pydt.date.fromordinal(day_ordinal)
-        is_friday_or_holiday = (d_date.weekday() == 4) 
-        is_saturday = (d_date.weekday() == 5)
+    def _evaluate_minute_logic(self, prefix: str, parquet_inst: str, active_inst: str,
+                               day_ordinal: int, minute_of_day: int, cn_seconds: int):
+        # ── 1. 强制平仓拦截器 ──
+        force_flat_now = 870 <= minute_of_day < 900
+        if not force_flat_now and self._is_night_preclose(prefix, parquet_inst, day_ordinal, minute_of_day):
+            force_flat_now = True
 
-        # ── 1. 强制平仓拦截器 (按品种独立判断) ──
-        for prefix, parquet_inst in self._prefix_to_parquet.items():
-            active_inst = self._active_contract.get(prefix)
-            if not active_inst or active_inst in self._eod_closed_insts:
-                continue
+        if force_flat_now and active_inst not in self._eod_closed_insts:
+            depth = self._latest_depth.get(active_inst)
+            if depth:
+                self._eod_closed_insts.add(active_inst)
+                self._active_windows.pop(active_inst, None)
+                current_lots = self._get_current_lots(active_inst)
+                self.log.info(f"⚙ REBAL {prefix} [FORCED FLAT] cur={current_lots}")
 
-            force_flat_now = False
-            
-            # 【规则 A】：每天下午 14:30 (870) 强平
-            if 870 <= minute_of_day < 900:
-                force_flat_now = True
-            
-            # 【规则 B】：周末或节假日前的夜盘强平
-            elif is_friday_or_holiday and minute_of_day >= 1260:
-                close_min = NIGHT_CLOSE_MINS.get(prefix, 1380)    
-                if close_min >= 1380 and minute_of_day >= close_min - 30:
-                    force_flat_now = True
-            elif is_saturday and minute_of_day <= 150:            
-                close_min = NIGHT_CLOSE_MINS.get(prefix, 150)
-                if minute_of_day >= close_min - 30:
-                    force_flat_now = True
-                    
-            if force_flat_now:
-                depth = self._latest_depth.get(active_inst)
-                if depth:
-                    self._eod_closed_insts.add(active_inst)
-                    self._active_windows.pop(active_inst, None)  
-                    current_lots = self._get_current_lots(active_inst)
-                    self.log.info(f"⚙ REBAL {prefix} [FORCED FLAT] cur={current_lots}")
-                    
-                    self._cancel_all_gtds(active_inst)
-                    if current_lots != 0:
-                        side = OrderSide.SELL if current_lots > 0 else OrderSide.BUY
-                        self._issue_order(active_inst, abs(current_lots), side, depth, 0)
+                self._cancel_all_gtds(active_inst)
+                if current_lots != 0:
+                    side = OrderSide.SELL if current_lots > 0 else OrderSide.BUY
+                    self._issue_order(active_inst, abs(current_lots), side, depth, 0)
+            return
 
-        # ── 2. 正常交易时段判定 (天然跳过开盘第一分钟) ──
-        is_trading = (541 <= minute_of_day < 870) or (1261 <= minute_of_day <= 1439) or (1 <= minute_of_day <= 150)
-        
-        if is_trading:
+        # ── 2. 正常交易时段判定（按品种的真实夜盘收盘时间） ──
+        if self._is_trading_minute(prefix, minute_of_day, skip_open_minute=True):
             if self._mapping_type in ["zscore", "robust"]:
                 slot = day_ordinal * 48 + minute_of_day // 30
-                is_new_slot = (self._last_slot is None or slot != self._last_slot)
+                is_new_slot = self._last_slot_by_inst.get(active_inst) != slot
                 
                 if is_new_slot:
-                    self._last_slot = slot
-                    self._current_slot_start_min = minute_of_day
-                    self._slot_extreme_signals.clear()
-                    
-                    for prefix, parquet_inst in self._prefix_to_parquet.items():
-                        if self._active_contract.get(prefix) in self._eod_closed_insts: continue
+                    self._last_slot_by_inst[active_inst] = slot
+                    self._slot_start_min_by_inst[active_inst] = minute_of_day
+                    self._slot_extreme_signals.pop(active_inst, None)
+
+                    if active_inst not in self._eod_closed_insts:
                         self._rebalance_fixed_grid(prefix, parquet_inst, day_ordinal, minute_of_day, is_new_slot=True)
                 else:
-                    if self._addon_window_min > 0 and (minute_of_day - self._current_slot_start_min) <= self._addon_window_min:
-                        for prefix, parquet_inst in self._prefix_to_parquet.items():
-                            if self._active_contract.get(prefix) in self._eod_closed_insts: continue
+                    slot_start = self._slot_start_min_by_inst.get(active_inst, minute_of_day)
+                    if self._addon_window_min > 0 and (minute_of_day - slot_start) <= self._addon_window_min:
+                        if active_inst not in self._eod_closed_insts:
                             self._rebalance_fixed_grid(prefix, parquet_inst, day_ordinal, minute_of_day, is_new_slot=False)
             
             elif self._mapping_type == "quantile":
-                for prefix, parquet_inst in self._prefix_to_parquet.items():
-                    if self._active_contract.get(prefix) in self._eod_closed_insts: continue
+                if active_inst not in self._eod_closed_insts:
                     self._rebalance_dynamic_event(prefix, parquet_inst, day_ordinal, minute_of_day, cn_seconds)
+
+    @staticmethod
+    def _is_trading_minute(prefix: str, minute_of_day: int, skip_open_minute: bool = False) -> bool:
+        day_start = 541 if skip_open_minute else 540
+        if (day_start <= minute_of_day < 615) or (630 <= minute_of_day < 690) or (810 <= minute_of_day < 900):
+            return True
+
+        close_min = NIGHT_CLOSE_MINS.get(prefix)
+        if close_min is None:
+            return False
+        night_start = 1261 if skip_open_minute else 1260
+        if close_min >= 1260:
+            return night_start <= minute_of_day < close_min
+        return minute_of_day >= night_start or 0 <= minute_of_day < close_min
+
+    def _has_long_calendar_gap(self, parquet_inst: str, day_ordinal: int) -> bool:
+        signal_days = self._signal_days_by_inst.get(parquet_inst, [])
+        next_pos = bisect_right(signal_days, day_ordinal)
+        return next_pos >= len(signal_days) or signal_days[next_pos] - day_ordinal > 1
+
+    def _is_night_preclose(self, prefix: str, parquet_inst: str,
+                           day_ordinal: int, minute_of_day: int) -> bool:
+        close_min = NIGHT_CLOSE_MINS.get(prefix)
+        if close_min is None or not self._has_long_calendar_gap(parquet_inst, day_ordinal):
+            return False
+        return close_min - 30 <= minute_of_day < close_min
 
     # ============================================================
     # 轨道 A：带追加机制的定时调仓 (High-Water Mark 模式)
@@ -741,7 +694,7 @@ class CommodityIntradayStrategy(Strategy):
             if sig_val != 0:
                 target_lots = compute_target_lots(sig_val, mid, prefix, self._per_inst_capital)
                 self._active_windows[active_inst] = {
-                    'expire_sec': self._add_trading_seconds(cn_seconds, 30 * 60),
+                    'expire_sec': self._add_trading_seconds(cn_seconds, 30 * 60, prefix, parquet_inst),
                     'target_lots': target_lots
                 }
                 self.log.info(f"⚙ EVENT TRIGGER {prefix} sig={sig_val} -> target={target_lots}")
@@ -757,7 +710,7 @@ class CommodityIntradayStrategy(Strategy):
                 if sig_val != 0:
                     target_lots = compute_target_lots(sig_val, mid, prefix, self._per_inst_capital)
                     self._active_windows[active_inst] = {
-                        'expire_sec': self._add_trading_seconds(cn_seconds, 30 * 60),
+                        'expire_sec': self._add_trading_seconds(cn_seconds, 30 * 60, prefix, parquet_inst),
                         'target_lots': target_lots
                     }
                     self.log.info(f"⚙ EVENT ROLL {prefix} sig={sig_val} target={target_lots}")
@@ -796,14 +749,22 @@ class CommodityIntradayStrategy(Strategy):
                                 side = OrderSide.BUY if addon > 0 else OrderSide.SELL
                                 self._issue_order(active_inst, abs(addon), side, depth, new_target)
 
-    def _add_trading_seconds(self, start_sec: int, delta_sec: int) -> int:
+    def _add_trading_seconds(self, start_sec: int, delta_sec: int,
+                             prefix: str, parquet_inst: str) -> int:
         curr = start_sec
         rem = delta_sec
+        valid_days = self._signal_day_sets_by_inst.get(parquet_inst, set())
+        if not valid_days:
+            return start_sec + delta_sec
+        last_valid_day = max(valid_days)
         while rem > 0:
             curr += 60
             mod = (curr % 86400) // 60
-            if (540 <= mod < 615) or (630 <= mod < 690) or \
-               (810 <= mod < 900) or (1260 <= mod < 1440) or (0 <= mod <= 150):
+            day_ordinal = curr // 86400 + self._EPOCH_ORDINAL
+            # 最后一个有效交易日之后已无回测事件，不再继续空转日历。
+            if day_ordinal > last_valid_day:
+                return curr
+            if day_ordinal in valid_days and self._is_trading_minute(prefix, mod):
                 rem -= 60
         return curr
 
@@ -860,18 +821,33 @@ class CommodityIntradayStrategy(Strategy):
             return -qty if positions[0].side == PositionSide.SHORT else qty
         return 0
 
-    def _on_new_day(self, day_ordinal: int):
-        next_ordinal = day_ordinal + 1
-        for prefix, parquet_inst in self._prefix_to_parquet.items():
-            today_fc = self.daily_active.get((parquet_inst, day_ordinal))
-            if today_fc:
-                exchange = INSTRUMENT_SPECS.get(prefix, (0, 0, "SIM"))[2]
-                self._active_contract[prefix] = f"{today_fc}.{exchange}"
-            tomorrow_fc = self.daily_active.get((parquet_inst, next_ordinal))
-            if tomorrow_fc:
-                exchange = INSTRUMENT_SPECS.get(prefix, (0, 0, "SIM"))[2]
-                self._next_day_contract[prefix] = f"{tomorrow_fc}.{exchange}"
-        self.log.info(f"📅 day_ordinal={day_ordinal} active={len(self._active_contract)} insts")
+    def _on_new_session(self, prefix: str, calendar_day: int, session_day: int):
+        parquet_inst = self._prefix_to_parquet[prefix]
+        futures_code = self._session_active.get((parquet_inst, session_day))
+        if futures_code is None:
+            futures_code = self.daily_active.get((parquet_inst, calendar_day))
+
+        self._session_day_by_prefix[prefix] = session_day
+        if futures_code is None:
+            return
+
+        exchange = INSTRUMENT_SPECS.get(prefix, (0, 0, "SIM"))[2]
+        active_inst = f"{futures_code}.{exchange}"
+        previous_inst = self._active_contract.get(prefix)
+        self._active_contract[prefix] = active_inst
+
+        for inst_str in {previous_inst, active_inst} - {None}:
+            self._active_windows.pop(inst_str, None)
+            self._slot_target_lots.pop(inst_str, None)
+            self._slot_extreme_signals.pop(inst_str, None)
+            self._last_minute_by_inst.pop(inst_str, None)
+            self._last_slot_by_inst.pop(inst_str, None)
+            self._slot_start_min_by_inst.pop(inst_str, None)
+            self._eod_closed_insts.discard(inst_str)
+
+        self.log.info(
+            f"📅 session_day={session_day} prefix={prefix} active={active_inst}"
+        )
 
     def _lookup_signal(self, inst: str, day_ordinal: int, minute_of_day: int) -> dict | None:
         sig = self.minute_idx.get((inst, day_ordinal, minute_of_day))
@@ -1004,7 +980,7 @@ class CommodityIntradayStrategy(Strategy):
 
 
 # ---- 5c. 品种注册 + 策略构造 ----
-def _make_instrument(futures_code: str) -> FuturesContract:
+def _make_instrument(futures_code: str, expiration_ns: int) -> FuturesContract:
     prefix_match = re.match(r"^([A-Za-z]+)", futures_code)
     prefix = prefix_match.group(1).upper() if prefix_match else ""
     
@@ -1016,11 +992,6 @@ def _make_instrument(futures_code: str) -> FuturesContract:
         multiplier, tick_size, exchange, margin, fee_type, fee_val = 10, 1.0, "SIM", 0.15, "ratio", 0.0001
         
     price_inc = Price.from_str(str(tick_size))
-
-    code = futures_code[len(prefix):]
-    yy, mm = 2000 + int(code[:2]), int(code[2:4])
-    expiry_dt = datetime(yy, mm, 15, tzinfo=CN_TZ)
-    expiration_ns = int(expiry_dt.timestamp() * 1e9)
 
     return FuturesContract(
         instrument_id=InstrumentId.from_str(f"{futures_code}.{exchange}"),
@@ -1049,8 +1020,18 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame, start_date_str: str = No
     print(f"📋 信号索引: {len(minute_idx)} 分钟级 + {len(daily_active)} 日级")
 
     all_futures = set(daily_active.values()) | {s["futures_code"] for s in minute_idx.values()}
+
+    signal_expirations: dict[str, int] = {}
+    for futures_code, last_time in signals_df.groupby("futures_code")["index_time"].max().items():
+        ts = pd.Timestamp(last_time)
+        ts = ts.tz_localize(CN_TZ) if ts.tzinfo is None else ts.tz_convert(CN_TZ)
+        signal_expirations[str(futures_code)] = int((ts + pd.Timedelta(minutes=1)).timestamp() * 1e9) - 1
     
     exchanges_needed = set()
+    venue_instrument_counts: dict[str, int] = {}
+    for prefix in COMM_POOL:
+        exchange = INSTRUMENT_SPECS.get(prefix, (0, 0, "SIM", 0, "ratio", 0))[2]
+        venue_instrument_counts[exchange] = venue_instrument_counts.get(exchange, 0) + 1
     for fc in all_futures:
         prefix_match = re.match(r"^([A-Za-z]+)", fc)
         prefix = prefix_match.group(1).upper() if prefix_match else ""
@@ -1136,17 +1117,28 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame, start_date_str: str = No
 
         engine = BacktestEngine(config=BacktestEngineConfig(trader_id=f"BT-{trd_date}"))
         for ex in exchanges_needed:
+            venue_start_equity = per_inst_capital * venue_instrument_counts.get(ex, 0)
             engine.add_venue(
                 venue=Venue(ex), oms_type=OmsType.NETTING, account_type=AccountType.MARGIN,
-                # 💡 关键改动：每日初始资金 = 昨日净值
-                starting_balances=[Money.from_str(f"{day_start_equity:.2f} CNY")],
+                # 每品种一份资金；交易所账户只获得其池内品种的资金份额。
+                starting_balances=[Money.from_str(f"{venue_start_equity:.2f} CNY")],
                 base_currency=Currency.from_str("CNY"), book_type=BookType.L2_MBP,
-                fee_model=UniversalFuturesFeeModel(cache=engine.cache),
+                fee_model=UniversalFuturesFeeModel(cache=engine.cache, trading_day=trd_date),
             )
+
+        # 当日沙盒中，每个合约的最后一笔快照就是本次加载数据的到期边界。
+        snapshot_expirations = {
+            inst_str.rsplit(".", 1)[0]: max(int(snap.ts_event) for snap in snap_list)
+            for inst_str, snap_list in snaps_by_inst.items()
+            if snap_list
+        }
 
         registered = {}
         for fc in sorted(all_futures):
-            instrument = _make_instrument(fc)
+            expiration_ns = snapshot_expirations.get(fc, 0) or signal_expirations.get(fc, 0)
+            if expiration_ns <= 0:
+                raise ValueError(f"无法从快照或信号推导合约 {fc} 的到期时间")
+            instrument = _make_instrument(fc, expiration_ns)
             engine.add_instrument(instrument)
             registered[fc] = str(instrument.id)
 
@@ -1166,11 +1158,12 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame, start_date_str: str = No
         engine.run()
 
         # ── 当日结算（唯一一次，基准 = 昨日净值） ──
-        day_net_pnl = 0.0
+        day_end_equity = 0.0
         for acc in engine.cache.accounts():
             bal = acc.balances_total().get(Currency.from_str("CNY"))
             if bal is not None:
-                day_net_pnl += float(bal) - day_start_equity
+                day_end_equity += float(bal)
+        day_net_pnl = day_end_equity - day_start_equity
 
         orders = engine.cache.orders()
         n_orders = len(orders)
@@ -1283,8 +1276,8 @@ def _print_global_stitched_performance(stats, start_balance):
     # 前面插一个基准点 (第0天的初始资金)
     s_eq = pd.Series([start_balance] + equities)
     
-    # 计算日收益率序列 (过滤掉未开仓导致的 0 收益日，让统计更真实)
-    s_ret = pd.Series(equities).diff().dropna() / start_balance
+    # 从初始资金开始计算，所以包含第一个交易日；每日以前一日净值为分母。
+    s_ret = s_eq.pct_change().dropna()
     active_days = len(s_ret[s_ret != 0])
     
     # 计算累计绝对收益
@@ -1389,11 +1382,9 @@ def _print_global_performance(stats):
 if __name__ == "__main__":
     import sys
 
-    train_only = "--train-only" in sys.argv
-    backtest_only = "--backtest-only" in sys.argv
-    
     start_date_str = "20251024"
     end_date_str = "20251231"
+    signal_path = SIGNALS_PATH
     
     for a in sys.argv:
         if a.startswith("--start-date="):
@@ -1402,21 +1393,16 @@ if __name__ == "__main__":
             end_date_str = a.split("=", 1)[1]
         elif a.startswith("--date="):
             start_date_str = a.split("=", 1)[1]
+        elif a.startswith("--signals="):
+            signal_path = a.split("=", 1)[1]
 
-    if not backtest_only:
-        print("=" * 80)
-        print("阶段 1: 训练 LightGBM & 生成 OOS 信号")
-        print("=" * 80)
-        signals_df = train_and_generate_signals()
-    else:
-        print("📂 加载已有信号文件 ...")
-        signals_df = pd.read_parquet(SIGNALS_OUT)
-        print(f"   加载: {len(signals_df):,} 行")
+    print("📂 加载外部信号文件 ...")
+    signals_df = load_signal_source(signal_path)
+    print(f"   加载: {len(signals_df):,} 行 | {signal_path}")
 
-    if not train_only:
-        print("\n" + "=" * 80)
-        print("阶段 2: NautilusTrader 回测")
-        print("=" * 80)
-        run_nt_backtest_multi_day(signals_df, start_date_str, end_date_str)
+    print("\n" + "=" * 80)
+    print("NautilusTrader 回测")
+    print("=" * 80)
+    run_nt_backtest_multi_day(signals_df, start_date_str, end_date_str)
 
     print("\n✅ 全部工作已完成")

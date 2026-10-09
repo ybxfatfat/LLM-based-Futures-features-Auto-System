@@ -90,7 +90,7 @@ class FeatureStreakMaxVolume(BaseTickFeature):
 # JSON Output Format
 你必须输出且仅输出一个严格合规的 JSON 对象，不得有任何其他闲聊文本。格式如下：
 {
-  "feature_name": "特征英文驼峰命名",
+  "feature_name": "特征英文驼峰类名，必须与 python_class_code 中唯一的顶层类名完全一致",
   "hypothesis": {
     "mechanism": "...",
     "counterparty_loser": "...",

@@ -22,8 +22,8 @@ from concurrent.futures import ProcessPoolExecutor
 project_root = Path(__file__).resolve().parent.parent
 data_dir = project_root / "data"
 
-PARQUET_PATH = str(data_dir / "factor_dataset_AllMarket_main_only_2025.parquet")
-OUTPUT_JSON = str(data_dir / "feature_quality_dashboard_2025.json")
+PARQUET_PATH = str(data_dir / "factor_dataset_AllMarket_main_only_2024.parquet")
+OUTPUT_JSON = str(data_dir / "feature_quality_dashboard_2024.json")
 MARKET_STATES_PATH = str(data_dir / "best_market_states_list.json")
 
 # 💥 用于存储每个特征分钟级仓位的分布式目录
@@ -140,7 +140,7 @@ def calc_metrics_and_charts(df_sub, feature, tgt, num_bins=10, hist_bins=50):
     # 🚨 回归 Pearson 相关系数
     res['full_ic'] = float(valid_df[feature].corr(valid_df[tgt], method='pearson'))
     
-    # 💥 替换为 2000 分钟无重叠窗口 Period IC，完美匹配全局评测基准
+    # 使用 2000 分钟无重叠窗口 Period IC，与全局评测基准保持一致
     time_factor, _ = pd.factorize(valid_df['index_time'], sort=True)
     valid_df['window_id'] = time_factor // 2000
     

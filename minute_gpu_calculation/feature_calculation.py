@@ -49,9 +49,7 @@ def load_target_instruments():
 # ======================================================================
 # 第一步：研究员配置区 (Factor Configuration)
 # ======================================================================
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent / 'miner'))
-from exported_factors import FACTOR_FORMULAS as EVOLVED_FORMULAS
+from miner.sample_features import FACTOR_FORMULAS as EVOLVED_FORMULAS
 
 FACTOR_FORMULAS = {
     **EVOLVED_FORMULAS,
@@ -64,7 +62,7 @@ FACTOR_FORMULAS = {
 
 import json
 
-MARKET_STATE_REGISTRY = "./data/market_states_registry_index.json"
+MARKET_STATE_REGISTRY = Path(__file__).resolve().parent.parent / "data" / "market_states_registry_index.json"
 if os.path.exists(MARKET_STATE_REGISTRY):
     with open(MARKET_STATE_REGISTRY, 'r') as f:
         ms_registry = json.load(f)
@@ -235,7 +233,7 @@ def run_factor_pipeline():
         del df_batch
         
     print(f"\n🎉 极其硬核：全年 {len(all_features)} 个因子全量流式分批生产完毕！")
-    print(f"📁 分批数据存放于: {out_dir}/ (后续训练时使用 polars concat 即可极速拼表)")
+    print(f"📁 分批数据存放于: {out_dir}/ (后续按 index_time/instrument/contract 横向对齐拼表)")
 
 if __name__ == "__main__":
     run_factor_pipeline()

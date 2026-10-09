@@ -1,13 +1,42 @@
 # eval_and_reflect.py
+import ast
 import pandas as pd
 import numpy as np
 import os
 import json
+from pathlib import Path
 from openai import OpenAI
 from rag_vector_store import LocalFactorKB
 
 CLIENT = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 KB = LocalFactorKB()
+
+
+def _load_generated_class_code(feature_name: str) -> str:
+    """从生成文件中精确取出与特征同名的最后一个顶层 class。"""
+    candidate_paths = [
+        Path.cwd() / "auto_generated_factors.py",
+        Path(__file__).resolve().parent / "auto_generated_factors.py",
+    ]
+    source_path = next((path for path in candidate_paths if path.exists()), None)
+    if source_path is None:
+        raise FileNotFoundError("找不到 auto_generated_factors.py，无法将特征代码写入 RAG")
+
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    matches = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == feature_name
+    ]
+    if not matches:
+        raise ValueError(f"{source_path} 中找不到顶层 class {feature_name}")
+
+    node = matches[-1]
+    start_lineno = min(
+        [node.lineno] + [decorator.lineno for decorator in node.decorator_list]
+    )
+    lines = source.splitlines(keepends=True)
+    return "".join(lines[start_lineno - 1:node.end_lineno]).rstrip()
 
 def evaluate_and_reflect(parquet_path: str, feature_name: str, target_col: str = "Ret_1m_Fwd"):
     """评测特征的真实分钟频收益率，并生成大模型反思"""
@@ -38,14 +67,13 @@ def evaluate_and_reflect(parquet_path: str, feature_name: str, target_col: str =
         "Q10_Ret_bps": float(q10_ret),
         "Q1_Ret_bps": float(q1_ret),
         "Full_IC": float(ic),
-        "Win_Rate": float(win_rate)
+        "win_rate": float(win_rate)
     }
     
     print(f"   ➤ 分组多空收益差: {spread:.2f} bps | 全样本 IC: {ic:.4f}")
 
-    # 2. 从本地读取刚刚生成的类代码和假设
-    with open("auto_generated_factors.py", "r", encoding="utf-8") as f:
-        full_code = f.read()
+    # 2. 从本地精确提取本次被评测特征的 class 源码
+    class_code = _load_generated_class_code(feature_name)
     
     # 3. 让 LLM 进行自动反思
     print("🧠 正在生成后验反思诊断报告...")
@@ -74,7 +102,7 @@ def evaluate_and_reflect(parquet_path: str, feature_name: str, target_col: str =
     # 4. 录入 RAG 闭环
     # 构造一个虚的 hypothesis dict 以兼容 RAG
     hyp_dict = {"mechanism": f"测试 {feature_name} 的实盘表现"}
-    KB.add_experience(feature_name, hyp_dict, "Class Code Saved", metrics, reflection)
+    KB.add_experience(feature_name, hyp_dict, class_code, metrics, reflection)
 
 if __name__ == "__main__":
     # 示例调用

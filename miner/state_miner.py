@@ -72,7 +72,7 @@ RET_COL_NAME = 'Ret_30m_Fwd'
 POSITIONS_DIR = project_root / "data" / "feature_positions"
 BASE_PANEL_DIR = project_root / "data" / "intraday_parquet" / "base_panel"
 BEST_FEATURES_FILE = project_root / "data" / f"best_features_{FOCUS_UNIVERSE.lower()}.json"
-STATE_REGISTRY_FILE = project_root / f"market_states_registry_{FOCUS_UNIVERSE.lower()}.json"
+STATE_REGISTRY_FILE = project_root / "data" / f"market_states_registry_{FOCUS_UNIVERSE.lower()}.json"
 
 # 互信息：必须至少有非零的非线性依存关系
 MI_MIN = 0.2
@@ -130,10 +130,15 @@ class Chat:
             )
         return response
 
-from tensor_context import GlobalTensorContext
-from dag_scheduler import DAGManager
-from batch_executor import BatchExecutor
-from evaluator import get_or_create_global_context, clean_dynamic_vram_tensors
+from minute_gpu_calculation.tensor_context import GlobalTensorContext
+from minute_gpu_calculation.dag_scheduler import DAGManager
+from minute_gpu_calculation.batch_executor import BatchExecutor
+from miner.evaluator import get_or_create_global_context, clean_dynamic_vram_tensors
+from miner.evolutionary_miner import macro_expand_formula
+from miner.libraries import (
+    load_compound_operators,
+    load_extra_base_fields as load_extra_base_fields_registry,
+)
 
 # ======================================================================
 # 📝 1. LLM Pydantic 约束
@@ -320,7 +325,7 @@ def extract_empirical_clues_for_llm(pos_files: list, n_samples: int = 3) -> str:
         t_end = row['index_time']
         t_start = t_end - pd.Timedelta(minutes=30)
         
-        panel_path = BASE_PANEL_DIR / f"base_panel_{inst}.parquet"
+        panel_path = BASE_PANEL_DIR / inst / f"base_panel_{inst}_parquet.parquet"
         if not panel_path.exists(): return None
         
         try:
@@ -514,12 +519,10 @@ def evaluate_regime_across_pool(df_state: pd.DataFrame, state_col: str, pos_file
 # 🚀 4. 大模型提词生成
 # ======================================================================
 def load_extra_base_fields() -> str:
-    # 脱敏修复：使用通用的相对路径
-    extra_path = project_root / "libraries" / "extra_base_fields.json"
-    if not extra_path.exists(): return ""
     try:
-        with open(extra_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = load_extra_base_fields_registry()
+        if not data:
+            return ""
         return f"\n【可用的扩展基础变量 (Extra Base Fields)】: {', '.join(list(data.keys()))}\n(可直接在公式中使用这些名称)"
     except Exception as e:
         logger.warning(f"读取 extra_base_fields 失败: {e}")
@@ -527,15 +530,13 @@ def load_extra_base_fields() -> str:
 
 def load_compound_operators_desc(sample_size: int = 5) -> str:
     try:
-        pth = project_root / "libraries" / "compound_operators.json"
-        if pth.exists():
-            with open(pth, "r", encoding="utf-8") as f_op:
-                data = json.load(f_op)
-            import random
+        data = load_compound_operators()
+        if data:
             keys = random.sample(list(data.keys()), min(sample_size, len(data)))
             lines = [f'- `{k}`: {data[k].get("description")}' for k in keys]
             return "\n【🚀 复合高级算子 (可直接调用)】\n" + "\n".join(lines)
-    except: pass
+    except Exception as e:
+        logger.warning(f"读取 compound_operators 失败: {e}")
     return ""
 
 def generate_states_via_llm(existing_names: list, empirical_clues: str) -> List[dict]:
@@ -654,6 +655,7 @@ def generate_states_via_llm(existing_names: list, empirical_clues: str) -> List[
 def start_state_miner(rounds=3):
     logger.info("=========================================================")
     logger.info(f"🌟🎯 启动 [数据驱动·非对称市场状态挖掘系统] ({FOCUS_UNIVERSE} 版) 🎯🌟")
+    STATE_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
     
     registry = {}
     if STATE_REGISTRY_FILE.exists():
@@ -690,9 +692,15 @@ def start_state_miner(rounds=3):
             
         dag = DAGManager()
         target_nodes = {}
+        compiled_formulas = {}
         for c in candidates:
-            try: target_nodes[c["name"]] = dag.add_formula(c["formula"])
-            except: pass
+            try:
+                expanded_formula = macro_expand_formula(c["formula"])
+                compiled_formula = simplify_and_safeguard_formula(expanded_formula)
+                target_nodes[c["name"]] = dag.add_formula(compiled_formula)
+                compiled_formulas[c["name"]] = compiled_formula
+            except Exception as exc:
+                logger.warning(f"⚠️ 状态公式 {c.get('name', '<unnamed>')} 展开或编译失败: {exc}")
                 
         if not target_nodes: continue
 
@@ -702,7 +710,7 @@ def start_state_miner(rounds=3):
             if nid in executor.out_degrees: executor.out_degrees[nid] += 999999
         
         executor.run()
-        df_final = executor.extract_multiple_signals(target_nodes_dict=target_nodes, mode="main_only", target_start="2025-01-08", target_end="2025-12-31")
+        df_final = executor.extract_multiple_signals(target_nodes_dict=target_nodes, mode="main_only", target_start="2024-01-08", target_end="2024-12-31")
 
         # 💥 脱敏/防呆修复：彻底清理了多余的重复回收逻辑
         clean_dynamic_vram_tensors(global_ctx, [])
@@ -747,15 +755,16 @@ def start_state_miner(rounds=3):
             # 获奖日志
             if res.get("passed", False) and "metrics" in res:
                 m = res["metrics"]
+                compiled_formula = compiled_formulas[name]
                 logger.info(f"\n🏆 [绝佳泛化环境入选] : {name} | 维度: {cand['category']}")
                 logger.info(f"   => 逻辑: {cand['idea_rationale']}")
-                logger.info(f"   => 公式: {cand['formula']}")
+                logger.info(f"   => 展开后公式: {compiled_formula}")
                 logger.info(f"   => Base IR: {m['base_ir']:.2f} | Uplift: {m['rel_uplift']*100:+.1f}% | "
                             f"MI: {m['mutual_info']:.5f} | KS: {m['ks_stat']:.4f}")
 
                 registry[name] = {
                                     "category": cand["category"],
-                                    "formula": cand["formula"],
+                                    "formula": compiled_formula,
                                     "rationale": cand["idea_rationale"],
                                     "eval_pool_size": res.get('valid_evals', 0),
                                     "stats": res,

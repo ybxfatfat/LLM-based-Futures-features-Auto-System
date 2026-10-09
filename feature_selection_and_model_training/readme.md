@@ -1,47 +1,46 @@
 ## 🔍 High-Resolution Feature Evaluation & Mapping / 高分辨率特征评价与仓位映射
 
-### 1. Vectorized Vectorized Feature Quality Assessment (向量化特征质量评估)
-To strictly prevent look-ahead bias and accurately measure the out-of-sample (OOS) predictive power of the generated features, we designed a highly optimized, multiprocessed evaluation engine (`feature_quality_2.py`[cite: 17]).
-为了严格防止未来函数泄露并准确衡量生成特征的样本外 (OOS) 预测能力，我们设计了一个高度优化的多进程评估引擎。
+### 1. Vectorized Feature Quality Assessment / 向量化特征质量评估
 
-Key metrics computed include (核心计算指标包括):
-*   **Period IC (2000-minute window)**: Replaced the traditional Daily IC to perfectly align with the 2000-minute non-overlapping evaluation window used in the core backtester. This ensures statistical robustness regardless of daily trading hours[cite: 17]. (将传统的 Daily IC 替换为 **Period IC**，完美对齐核心回测器中使用的 2000 分钟无重叠评价窗口，确保跨品种评估的统计学稳健性)。
-*   **Decile Return Spreads (Q10 - Q1)**: Beyond linear correlation (IC), the engine automatically buckets features into 10 quantiles to track monotonicity and long-short return spreads[cite: 17]. (超越线性相关性，自动将特征分为 10 组，追踪多空收益差与单调性)。
-*   **Vectorized Simulation Metrics (向量化简易回测指标)**: The script runs a lightning-fast NumPy-based vectorized backtest computing:
-    *   **Annualized Return (bps)** (年化收益率 bps)[cite: 17]
-    *   **Sharpe Ratio** (夏普比率)[cite: 17]
-    *   **Turnover Rate** (换手率)[cite: 17]
+`feature_quality.py` is a local multiprocessed diagnostics engine for the **2024 in-sample research period**. It compares generated features through several complementary statistics; it does not, by itself, establish out-of-sample predictive power. A genuine OOS claim requires a later period that was not used for feature generation, direction selection, threshold tuning, or model validation.
 
-### 2. AlphaMiner Pro Dashboard (交互式特征分析看板)
-To make sense of the massive evaluation metrics across hundreds of instruments, we built an interactive Streamlit dashboard (`dashboard_app_2.py`[cite: 16]).
-为了直观地分析数百个品种的海量评估指标，我们构建了一个基于 Streamlit 的交互式数据看板。
+`feature_quality.py` 是面向 **2024 年样本内研究期**的本地多进程诊断引擎。它通过多组互补指标比较生成特征，但这些结果本身不构成样本外预测力证明。真正的 OOS 结论需要使用一个未参与特征生成、方向选择、阈值调优或模型验证的后续时期。
 
-*   **Feature-Centric View (单特征下钻视图)**: Deep dive into a specific feature's performance, displaying Decile Return bar charts, Cross-Instrument Stability (IC distribution across different futures), and Half-Year (H1 vs H2) distributional shifts[cite: 16]. (深入剖析特定特征的表现，展示分位数收益柱状图、跨品种稳定性以及上下半年分布漂移)。
-*   **Scope-Centric View (全局横向排行榜)**: Rank all generated features based on specific metrics (e.g., Period IC, Decile Spreads) across the entire commodity or index pool, complete with threshold filtering[cite: 16]. (在全市场池子中，基于特定指标对所有生成的特征进行横向排行与阈值筛选)。
+Key diagnostics include (核心诊断指标包括):
 
-## 3: Graph-Based Feature Selection / 阶段三：基于图网络的特征正交与分层初筛
+*   **Period IC (2000-minute window)**: Computes IC over non-overlapping 2000-minute windows so that the evaluation unit is consistent across instruments with different daily session lengths. (使用 2000 分钟不重叠窗口计算 IC，使不同日内交易时长的品种采用一致的评价尺度)。
+*   **Decile Return Spreads (Q10 - Q1)**: Buckets a feature into 10 quantiles to inspect monotonicity and the long-short return spread in addition to linear correlation. (将特征分为 10 组，在相关系数之外检查单调性与多空收益差)。
+*   **Vectorized Simulation Metrics (向量化简易回测指标)**: The NumPy-based diagnostic simulation reports annualized return in bps, Sharpe ratio, and turnover under the script's stated assumptions. (基于 NumPy 的诊断性模拟在脚本所列假设下输出年化收益 bps、夏普比率与换手率)。
 
-Before feeding features into complex machine learning models, the system employs rigorous network theory and a hierarchical voting mechanism to deduplicate and extract orthogonal Alphas (`select_feature_2.py`). / 在进入树模型前，利用图网络与分层投票机制进行严格的因子正交去重与可用性初筛。
+### 2. AlphaMiner Pro Dashboard / 交互式特征分析看板
+
+`dashboard_app.py` provides a Streamlit interface for reviewing the metrics exported by `feature_quality.py`. / `dashboard_app.py` 使用 Streamlit 展示 `feature_quality.py` 导出的评测结果。
+
+*   **Feature-Centric View (单特征下钻视图)**: Shows decile-return charts, cross-instrument IC distributions, and H1-versus-H2 distribution shifts for a selected feature. (展示指定特征的分位数收益、跨品种 IC 分布及上下半年分布变化)。
+*   **Scope-Centric View (全局横向视图)**: Ranks generated features by selected metrics within the chosen commodity or index pool and supports threshold filtering. (在选定的商品或指数品种池内按指标比较特征，并支持阈值筛选)。
+
+## 3. Graph-Based Feature Selection / 阶段三：基于图网络的特征正交与分层初筛
+
+Before model training, `select_feature.py` uses a correlation network and hierarchical voting to reduce redundancy and retain representative candidates. / 在模型训练前，`select_feature.py` 使用相关性网络与分层投票降低冗余，并保留具有代表性的候选特征。
 
 *   **Hierarchical Community Discovery & Voting (社区发现与分层投票筛选)**:
-    1. **Single-Instrument Pre-selection**: Within each highly-collinear feature community (extracted via Greedy Modularity), the system pre-selects the best performing feature for *each individual instrument* based on historical metrics. (单品种社区内预选：在每个高内聚的共线性特征社区内，首先针对单个品种，依据历史指标挑选出最优特征)。
-    2. **Target Pool Coverage Retention**: A community is only retained if it provides valid Alpha for a sufficient ratio (e.g., 20%) of the entire target pool. (全池覆盖率保留：如果某个社区选出的特征无法覆盖目标品种池中足够比例的品种，该特征社区将被整体淘汰)。
-    3. **Intra-Community Voting & Tie-breaking**: Features receive "votes" from different instruments within the community. Ties are broken using a globally computed **Pooled IC**, ensuring the final selected representative is the most universally robust Alpha across the entire asset universe. (社区内投票与终选比较：统计社区内各特征获得的“品种选票”。平局时，利用全市场严格洗膜后的 **Pooled IC** 进行绝对值对比决出胜者，确保每个正交社区只保留唯一的、普适性最强的超级特征)。
-*   **Strict Tradability Masking (严苛的可交易池屏蔽)**: Evaluates Pooled IC strictly on clean, tradable samples—masking out End-of-Day (EOD) closures, illiquid night sessions, and contract rollover periods, preventing illusory performance. (在计算混池 Pooled IC 时，强制施加极其严格的时空掩码——精准剔除尾盘、长假前夜盘以及换月跳空期，只在“绝对安全可交易”的净样本中验证预测力)。
+    1. **Single-Instrument Pre-selection**: Within each highly correlated community found by Greedy Modularity, the system selects a representative for each instrument from historical in-sample metrics. (在 Greedy Modularity 识别出的高相关社区内，依据历史样本内指标为各品种选择代表特征)。
+    2. **Target Pool Coverage Retention**: A community is retained only when its candidates cover a configured share of the target pool, such as 20%. (只有当候选特征覆盖达到设定比例，例如目标品种池的 20%，对应社区才会被保留)。
+    3. **Intra-Community Voting & Tie-breaking**: Instrument-level votes determine the representative; ties are resolved with pooled IC under the configured sample mask. (使用品种级投票选择社区代表，平票时以既定样本掩码下的 Pooled IC 决胜)。
+*   **Tradability Masking (可交易样本屏蔽)**: The pooled calculation excludes configured end-of-day, illiquid-night-session, and rollover samples to reduce contamination from periods outside the intended trading scope. (混池计算按配置剔除尾盘、低流动性夜盘与换月样本，以减少非目标交易时段造成的污染)。
 
-### 4. Position Mapping Logic in Tree Models (模型预测值的仓位映射)
-In quantitative trading, a raw model prediction (e.g., an expected return) must be converted into an actual target position ([-1.0, 1.0]). In `tree_models_2.py`[cite: 21], we implemented a robust "2x2 Orthogonal Matrix" of mapping strategies to handle low signal-to-noise ratio (SNR) environments without data leakage.
-在量化交易中，原始的模型预测值必须被转换为实际的目标仓位 ([-1.0, 1.0])。在树模型回测器中，我们实现了一个强大的“2×2 正交矩阵式”映射策略，以在无未来函数泄露的前提下处理低信噪比环境。
+### 4. Position Mapping Logic in Tree Models / 模型预测值的仓位映射
 
-#### Dimension 1: The Reference Timeframe (时间基准维度)
-*   **Real-time Rolling Windows (实时长窗口滚动)**: Dynamically calculates distribution statistics over a long lookback period (e.g., pooled over N instruments * W minutes). This allows the model to adapt to recent market regime shifts[cite: 21]. (在一个长回看窗口内动态计算分布统计量，允许模型自适应近期的市场状态漂移)。
-*   **In-Sample (IS) Static Anchoring (样本内静态锚定)**: Extracts exact distribution statistics (mean, standard deviation, quantiles) directly from the In-Sample (IS) training folds. These constants are strictly carried forward into the Out-of-Sample (OOS) period, preventing dynamic-window-induced turnover and strictly eliminating look-ahead bias[cite: 21]. (直接从样本内训练集中提取确切的分布统计量，并将其作为绝对常数应用到样本外。这种极度严苛的做法有效防止了滚动窗口带来的高换手率)。
+In quantitative trading, raw model predictions must be mapped to target positions in `[-1.0, 1.0]`. `tree_models.py` implements a 2×2 family of mapping choices so that the assumptions about reference history and scaling are explicit. / 在量化交易中，原始模型预测值需要映射为 `[-1.0, 1.0]` 范围内的目标仓位。`tree_models.py` 实现了一组 2×2 映射选择，使时间基准与数值缩放假设保持显式可审查。
 
-#### Dimension 2: The Scaling Mathematics (数学缩放维度)
-Both of the timeframes above (Rolling & IS) are tested against two mathematical scaling paradigms[cite: 21] (上述两种时间基准，均分别结合了以下两种数学缩放范式进行测试):
+#### Dimension 1: Reference Timeframe / 维度一：时间基准
 
-*   **Z-Score Mapping (Z-Score 映射)**: Scales predictions using standard deviation. 
-    *   *Demeaned*: Centers the signal by subtracting the mean to capture relative momentum[cite: 21].
-    *   *No-Demean*: Only scales by volatility, preserving the absolute directional drift of the raw prediction[cite: 21].
-    (利用标准差进行缩放。**减均值版**捕捉相对动量；**不减均值版**保留原始预测的绝对方向漂移)。
-*   **Robust Extremum / Quantile Lock (稳健极值与分位数锁定)**: Utilizes the IQR (Interquartile Range) or fixed hard-quantiles (e.g., Top 10% and Bottom 10%) instead of standard deviation to scale predictions. This neutralizes the impact of extreme outliers and restricts trading strictly to high-conviction zones[cite: 21]. (使用 IQR 或固定的硬分位数替代标准差进行缩放或锁仓触发，完美免疫极端异常值的干扰，并将交易严格限制在高确信度区间)。
+*   **Real-time Rolling Windows (实时长窗口滚动)**: Calculates distribution statistics from a trailing historical window to react to recent regime changes. (从滚动历史窗口计算分布统计量，以响应近期市场状态变化)。
+*   **In-Sample Static Anchoring (样本内静态锚定)**: Estimates mean, standard deviation, or quantiles from the training sample and freezes those constants for later application. This avoids using future observations in the mapping statistics, provided the training boundary is respected. (从训练样本估计均值、标准差或分位数，并将这些常数冻结后用于后续时期；只要严格遵守训练边界，映射统计量就不会读取未来观测)。
+
+#### Dimension 2: Scaling Mathematics / 维度二：数学缩放
+
+*   **Z-Score Mapping (Z-Score 映射)**:
+    *   *Demeaned*: Centers the signal before scaling to emphasize relative strength. (先减均值再缩放，强调相对强弱)。
+    *   *No-Demean*: Scales without centering to preserve the directional level of the raw prediction. (不减均值，仅进行尺度调整，以保留原始预测的方向水平)。
+*   **Robust Extremum / Quantile Lock (稳健极值与分位数锁定)**: Uses IQR-based bounds or fixed tail quantiles instead of relying only on standard deviation, reducing the influence of extreme observations and concentrating exposure in configured high-conviction regions. (使用 IQR 边界或固定尾部分位数，而非只依赖标准差，从而降低极端观测的影响，并将仓位集中在设定的高确信度区域)。

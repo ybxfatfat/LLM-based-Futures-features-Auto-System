@@ -24,13 +24,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Literal, Dict, Any
 
-# Ensure project root is in sys.path
+# Keep research-state files under miner/, while importing project modules from
+# the repository root through stable package-qualified paths.
 project_root = Path(__file__).resolve().parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+repository_root = project_root.parent
+if str(repository_root) not in sys.path:
+    sys.path.insert(0, str(repository_root))
 
 # Import evaluator tools
-from evaluator import evaluate_factor_batch, get_or_create_global_context
+from miner.evaluator import evaluate_factor_batch, get_or_create_global_context
+from miner.libraries import (
+    load_compound_operators,
+    load_extra_base_fields,
+    load_foundation_features,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -46,14 +53,8 @@ def load_compound_operators_desc(sample_size: int = 10) -> str:
     samples them to prevent LLM attention bias and force genetic diversity (Operator Dropout).
     """
     try:
-        pth = project_root / "libraries" / "compound_operators.json"
-        if pth.exists():
-            with open(pth, "r", encoding="utf-8") as f_op:
-                data = json.load(f_op)
-            
-            if not data:
-                return "- (当前复合算子库为空)"
-                
+        data = load_compound_operators()
+        if data:
             import random
             keys = list(data.keys())
             # 💥 核心逻辑：随机抽取 N 个复合算子 (防止 Prompt 冗长和注意力集中)
@@ -460,7 +461,6 @@ def macro_expand_formula(formula_str: str) -> str:
     Recursively expands all registered custom foundation features and multi-step compound operators in a formula string.
     Ensures that the output formula contains ONLY primitive execution tensors understood by the GPU backtest engine.
     """
-    from libraries import load_foundation_features, load_compound_operators
     custom_feats = load_foundation_features()
     custom_ops = load_compound_operators()
 
@@ -776,7 +776,6 @@ def build_evolutionary_prompt(layer_num: int, state: dict, available_inputs_text
     compound_ops_desc = load_compound_operators_desc()
     
     # 获取外部衍生特征
-    from libraries import load_extra_base_fields
     extra_fields = load_extra_base_fields()
     extra_fields_text = ""
     if extra_fields:
@@ -819,7 +818,6 @@ def build_evolutionary_prompt(layer_num: int, state: dict, available_inputs_text
         import random
         sampled_features_text = ""
         try:
-            from libraries import load_foundation_features, load_extra_base_fields
             combined_pool = {}
             standard_feats = load_foundation_features()
             if standard_feats:
@@ -1150,6 +1148,7 @@ def run_layer_generation(state: dict, layer_num: int):
             step_inputs_lines = []
             for item in current_l4_materials:
                 m = item.get("metrics", {}) or {}
+                q_returns_str = format_quantile_returns_10(m)
                 step_inputs_lines.append(
                     f"- ID: {item['name']}\n"
                     f"  机理: {item['rationale']}\n"
