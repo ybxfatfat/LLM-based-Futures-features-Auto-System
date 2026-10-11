@@ -13,7 +13,7 @@ import re
 import glob
 import gc
 from bisect import bisect_right
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -33,11 +33,10 @@ DATA_DIR = str(project_root / "data")
 MAX_WEIGHT_PER_INST = 1.0    
 TOTAL_CAPITAL = 10_000_000   
 REBALANCE_INTERVAL_MIN = 30  
-GTD_STAGE1_SEC = 45          
-GTD_STAGE2_SEC = 45          
-MIN_BEST_QTY = 50            
 ADDON_WINDOW_MIN = 5         
 MAPPING_TYPE = "zscore"      
+SIGNAL_EXECUTION_DELAY_NS = 500_000_000
+MAX_ADVERSE_TICKS_FROM_OPPOSITE = 1
 
 # ═══════════════════════════════════════════════════════════════
 # 1. 交易池与品种规格配置 (纯净版标准前缀)
@@ -179,7 +178,7 @@ INTRADAY_OPEN_FEE_OVERRIDES_2025 = {
 # ═══════════════════════════════════════════════════════════════
 
 def load_signal_source(path: str = SIGNALS_PATH) -> pd.DataFrame:
-    """读取模型流程预先生成的目标仓位信号，不在回测脚本中训练模型。"""
+    """读取模型流程预先生成的目标仓位信号。"""
     if not os.path.exists(path):
         raise FileNotFoundError(f"找不到信号文件: {path}")
 
@@ -233,7 +232,7 @@ from nautilus_trader.model.enums import (
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue, PositionId
 from nautilus_trader.model.objects import Price, Quantity, Currency, Money
 from nautilus_trader.model.instruments import FuturesContract
-from nautilus_trader.model.events.order import OrderFilled, OrderExpired
+from nautilus_trader.model.events.order import OrderFilled
 from nautilus_trader.model.enums import PositionSide
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.trading.config import StrategyConfig
@@ -446,13 +445,6 @@ def _top_of_book(snap: OrderBookDepth10):
     mid = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
     return best_bid, best_ask, mid
 
-def _best_size(snap: OrderBookDepth10, side: OrderSide) -> float:
-    orders = snap.bids if side == OrderSide.BUY else snap.asks
-    for o in orders:
-        p, s = o.price.as_double(), o.size.as_double()
-        if p > 0 and s > 0: return s
-    return 0.0
-
 def compute_target_lots(target_weight: float, mid_price: float, prefix: str, 
                         capital: float = TOTAL_CAPITAL) -> int:
     multiplier = INSTRUMENT_SPECS.get(prefix, (10, 1.0))[0]
@@ -494,8 +486,11 @@ class CommodityIntradayStrategy(Strategy):
         self._slot_extreme_signals: dict[str, float] = {} 
         self._slot_target_lots: dict[str, int] = {}  # 💡 记录当前窗格累计下达的目标持仓
 
-        # 💡 并发订单追踪字典 {inst_str: {client_order_id: {"phase": 1, "order": order, "target_lots": lots}}}
-        self._gtq_orders: dict[str, dict] = {}
+        # 商品侧按首次出手时的对手价锚定成交带，并在后续快照重复 IOC 吃单。
+        self._execution_targets: dict[str, int] = {}
+        self._active_ioc_orders: dict[str, object] = {}
+        self._execution_limits: dict[str, Price] = {}
+        self._execution_sides: dict[str, OrderSide] = {}
         self._latest_depth: dict[str, OrderBookDepth10] = {}
 
         self._per_inst_capital = per_inst_capital
@@ -522,9 +517,12 @@ class CommodityIntradayStrategy(Strategy):
         self.log.info(f"Strategy started [{self._mapping_type} mode]")
 
     def on_stop(self) -> None:
-        for inst_str in list(self._gtq_orders.keys()):
-            self._cancel_all_gtds(inst_str)
-        self._gtq_orders.clear()
+        for inst_str in list(self._active_ioc_orders.keys()):
+            self._cancel_active_ioc(inst_str)
+        self._active_ioc_orders.clear()
+        self._execution_targets.clear()
+        self._execution_limits.clear()
+        self._execution_sides.clear()
 
     # ============================================================
     # 核心回调 — 分钟级调度
@@ -533,9 +531,11 @@ class CommodityIntradayStrategy(Strategy):
         inst_str = str(depth.instrument_id)
         self._latest_depth[inst_str] = depth
 
-        cn_seconds = depth.ts_event // 1_000_000_000 + self._SEC_UTC_TO_CN
+        cn_ns = depth.ts_event + self._SEC_UTC_TO_CN * 1_000_000_000
+        cn_seconds = cn_ns // 1_000_000_000
         day_ordinal = cn_seconds // self._SEC_PER_DAY + self._EPOCH_ORDINAL
         minute_of_day = (cn_seconds % self._SEC_PER_DAY) // 60  
+        ns_into_minute = cn_ns % (60 * 1_000_000_000)
 
         prefix_match = re.match(r"^([A-Za-z]+)", inst_str)
         prefix = prefix_match.group(1).upper() if prefix_match else ""
@@ -547,13 +547,14 @@ class CommodityIntradayStrategy(Strategy):
 
             if self._active_contract.get(prefix) == inst_str:
                 minute_key = (day_ordinal, minute_of_day)
-                if self._last_minute_by_inst.get(inst_str) != minute_key:
-                    self._last_minute_by_inst[inst_str] = minute_key
-                    self._evaluate_minute_logic(
-                        prefix, parquet_inst, inst_str, day_ordinal, minute_of_day, cn_seconds
-                    )
-
-        self._check_gtq(inst_str, depth)
+                # 分钟信号在整分完成；使用该分钟第一条 >= 500ms 的盘口开始执行。
+                if ns_into_minute >= SIGNAL_EXECUTION_DELAY_NS:
+                    if self._last_minute_by_inst.get(inst_str) != minute_key:
+                        self._last_minute_by_inst[inst_str] = minute_key
+                        self._evaluate_minute_logic(
+                            prefix, parquet_inst, inst_str, day_ordinal, minute_of_day, cn_seconds
+                        )
+                    self._continue_aggressive_execution(inst_str, depth)
 
     # ============================================================
     # 双轨制调度中心
@@ -573,10 +574,7 @@ class CommodityIntradayStrategy(Strategy):
                 current_lots = self._get_current_lots(active_inst)
                 self.log.info(f"⚙ REBAL {prefix} [FORCED FLAT] cur={current_lots}")
 
-                self._cancel_all_gtds(active_inst)
-                if current_lots != 0:
-                    side = OrderSide.SELL if current_lots > 0 else OrderSide.BUY
-                    self._issue_order(active_inst, abs(current_lots), side, depth, 0)
+                self._set_execution_target(active_inst, 0, depth)
             return
 
         # ── 2. 正常交易时段判定（按品种的真实夜盘收盘时间） ──
@@ -648,14 +646,8 @@ class CommodityIntradayStrategy(Strategy):
             self._slot_extreme_signals[active_inst] = sig_val
             target_lots = compute_target_lots(sig_val, mid, prefix, self._per_inst_capital)
             self._slot_target_lots[active_inst] = target_lots
-            
-            self._cancel_all_gtds(active_inst)
-            delta = target_lots - current_lots
             self.log.info(f"⚙ GRID REBAL {prefix} sig={sig_val:.3f} target={target_lots} cur={current_lots}")
-            
-            if delta != 0:
-                side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-                self._issue_order(active_inst, abs(delta), side, depth, target_lots)
+            self._set_execution_target(active_inst, target_lots, depth)
         else:
             extreme_sig = self._slot_extreme_signals.get(active_inst, 0.0)
             if (extreme_sig > 0 and sig_val > extreme_sig) or (extreme_sig < 0 and sig_val < extreme_sig):
@@ -670,9 +662,7 @@ class CommodityIntradayStrategy(Strategy):
                     if is_adding_long or is_adding_short:
                         self.log.info(f"🚀 GRID ADD-ON {prefix} sig: {extreme_sig:.3f} -> {sig_val:.3f}, adding {addon_delta} lots")
                         self._slot_target_lots[active_inst] = new_target_lots
-                        side = OrderSide.BUY if addon_delta > 0 else OrderSide.SELL
-                        # 💡 绝不撤旧单！仅发差额新单并发排队
-                        self._issue_order(active_inst, abs(addon_delta), side, depth, new_target_lots)
+                        self._set_execution_target(active_inst, new_target_lots, depth)
 
     # ============================================================
     # 轨道 B：事件驱动的 30 分钟动态沙漏
@@ -698,15 +688,10 @@ class CommodityIntradayStrategy(Strategy):
                     'target_lots': target_lots
                 }
                 self.log.info(f"⚙ EVENT TRIGGER {prefix} sig={sig_val} -> target={target_lots}")
-                self._cancel_all_gtds(active_inst)
-                delta = target_lots - current_lots
-                if delta != 0:
-                    side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-                    self._issue_order(active_inst, abs(delta), side, depth, target_lots)
+                self._set_execution_target(active_inst, target_lots, depth)
         else:
             if cn_seconds >= window['expire_sec']:
                 self._active_windows.pop(active_inst)
-                self._cancel_all_gtds(active_inst)
                 if sig_val != 0:
                     target_lots = compute_target_lots(sig_val, mid, prefix, self._per_inst_capital)
                     self._active_windows[active_inst] = {
@@ -714,21 +699,16 @@ class CommodityIntradayStrategy(Strategy):
                         'target_lots': target_lots
                     }
                     self.log.info(f"⚙ EVENT ROLL {prefix} sig={sig_val} target={target_lots}")
-                    delta = target_lots - current_lots
-                    if delta != 0:
-                        side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-                        self._issue_order(active_inst, abs(delta), side, depth, target_lots)
+                    self._set_execution_target(active_inst, target_lots, depth)
                 else:
                     self.log.info(f"⚙ EVENT EXPIRE {prefix} closing pos")
-                    if current_lots != 0:
-                        side = OrderSide.SELL if current_lots > 0 else OrderSide.BUY
-                        self._issue_order(active_inst, abs(current_lots), side, depth, 0)
+                    self._set_execution_target(active_inst, 0, depth)
             else:
                 if sig_val == 0:
                     if window['target_lots'] != 0:
                         self.log.info(f"⚙ EVENT CANCEL {prefix} sig->0. Keeping filled {current_lots} lots")
                         window['target_lots'] = 0
-                        self._cancel_all_gtds(active_inst)
+                        self._pause_aggressive_execution(active_inst)
                 else:
                     new_target = compute_target_lots(sig_val, mid, prefix, self._per_inst_capital)
                     old_target = window['target_lots']
@@ -737,17 +717,7 @@ class CommodityIntradayStrategy(Strategy):
                         window['target_lots'] = new_target
                         if addon != 0:
                             self.log.info(f"⚙ EVENT UPDATE {prefix} sig->{sig_val}. New target={new_target}")
-                            is_reversal = (old_target > 0 and new_target < 0) or (old_target < 0 and new_target > 0)
-                            if is_reversal or old_target == 0:
-                                self._cancel_all_gtds(active_inst)
-                                delta = new_target - current_lots
-                                if delta != 0:
-                                    side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-                                    self._issue_order(active_inst, abs(delta), side, depth, new_target)
-                            else:
-                                # 💡 纯粹的同向追仓：绝不撤旧单！仅发差额新单并发排队
-                                side = OrderSide.BUY if addon > 0 else OrderSide.SELL
-                                self._issue_order(active_inst, abs(addon), side, depth, new_target)
+                            self._set_execution_target(active_inst, new_target, depth)
 
     def _add_trading_seconds(self, start_sec: int, delta_sec: int,
                              prefix: str, parquet_inst: str) -> int:
@@ -769,50 +739,149 @@ class CommodityIntradayStrategy(Strategy):
         return curr
 
     # ============================================================
-    # 通用的下单与状态更新执行引擎 (1-to-N 架构)
+    # 商品主动执行：固定首个对手价锚点，在锚点及最多深一 Tick 内重复 IOC
     # ============================================================
-    def _issue_order(self, active_inst: str, qty: int, side: OrderSide, depth: OrderBookDepth10, target_lots: int):
-        """发单引擎：绝不撤单，支持并发行走"""
-        if qty <= 0: return
-        best_bid, best_ask, mid = _top_of_book(depth)
-        limit_price = best_bid if side == OrderSide.BUY else best_ask
-        if _best_size(depth, side) < MIN_BEST_QTY:
-            limit_price = best_ask if side == OrderSide.BUY else best_bid
+    @staticmethod
+    def _is_working_order(order) -> bool:
+        return order.status in (
+            OrderStatus.INITIALIZED,
+            OrderStatus.SUBMITTED,
+            OrderStatus.ACCEPTED,
+            OrderStatus.PENDING_CANCEL,
+            OrderStatus.PENDING_UPDATE,
+            OrderStatus.PARTIALLY_FILLED,
+        )
 
-        expire_dt = self.clock.utc_now() + timedelta(seconds=GTD_STAGE1_SEC)
+    def _cancel_active_ioc(self, inst_str: str) -> None:
+        order = self._active_ioc_orders.pop(inst_str, None)
+        if order is None:
+            return
+        live_order = self.cache.order(order.client_order_id)
+        candidate = live_order if live_order is not None else order
+        if self._is_working_order(candidate):
+            try:
+                self.cancel_order(candidate)
+            except Exception:
+                pass
+
+    def _pause_aggressive_execution(self, inst_str: str) -> None:
+        self._execution_targets.pop(inst_str, None)
+        self._execution_limits.pop(inst_str, None)
+        self._execution_sides.pop(inst_str, None)
+        self._cancel_active_ioc(inst_str)
+
+    @staticmethod
+    def _execution_side_and_limit(
+        active_inst: str,
+        delta: int,
+        depth: OrderBookDepth10,
+    ) -> tuple[OrderSide, Price] | None:
+        best_bid, best_ask, _ = _top_of_book(depth)
+        if best_bid <= 0 or best_ask <= 0 or delta == 0:
+            return None
+
+        prefix_match = re.match(r"^([A-Za-z]+)", active_inst)
+        prefix = prefix_match.group(1).upper() if prefix_match else ""
+        tick_size = INSTRUMENT_SPECS.get(prefix, (10, 1.0))[1]
+        tick = Decimal(str(tick_size))
+
+        if delta > 0:
+            side = OrderSide.BUY
+            limit_value = Decimal(str(best_ask)) + tick * MAX_ADVERSE_TICKS_FROM_OPPOSITE
+        else:
+            side = OrderSide.SELL
+            limit_value = Decimal(str(best_bid)) - tick * MAX_ADVERSE_TICKS_FROM_OPPOSITE
+
+        return side, Price.from_str(str(limit_value))
+
+    def _set_execution_target(
+        self,
+        active_inst: str,
+        target_lots: int,
+        depth: OrderBookDepth10,
+    ) -> None:
+        target_lots = int(target_lots)
+        self._cancel_active_ioc(active_inst)
+        self._execution_limits.pop(active_inst, None)
+        self._execution_sides.pop(active_inst, None)
+        self._execution_targets[active_inst] = target_lots
+
+        current_lots = self._get_current_lots(active_inst)
+        delta = target_lots - current_lots
+        if delta == 0:
+            self._execution_targets.pop(active_inst, None)
+            self._execution_limits.pop(active_inst, None)
+            self._execution_sides.pop(active_inst, None)
+            return
+
+        execution = self._execution_side_and_limit(active_inst, delta, depth)
+        if execution is None:
+            return
+        side, limit_price = execution
+        self._execution_sides[active_inst] = side
+        self._execution_limits[active_inst] = limit_price
+        self.log.info(
+            f"⚡ IOC ANCHOR {active_inst} side={side} limit={limit_price.as_double():.8f}"
+        )
+
+    def _continue_aggressive_execution(
+        self,
+        active_inst: str,
+        depth: OrderBookDepth10,
+    ) -> None:
+        target_lots = self._execution_targets.get(active_inst)
+        if target_lots is None:
+            return
+
+        best_bid, best_ask, _ = _top_of_book(depth)
+        if best_bid <= 0 or best_ask <= 0:
+            return
+
+        working = self._active_ioc_orders.get(active_inst)
+        if working is not None:
+            live_order = self.cache.order(working.client_order_id)
+            candidate = live_order if live_order is not None else working
+            if self._is_working_order(candidate):
+                return
+            self._active_ioc_orders.pop(active_inst, None)
+
+        current_lots = self._get_current_lots(active_inst)
+        delta = target_lots - current_lots
+        if delta == 0:
+            self._execution_targets.pop(active_inst, None)
+            self._execution_limits.pop(active_inst, None)
+            self._execution_sides.pop(active_inst, None)
+            return
+
+        side = OrderSide.BUY if delta > 0 else OrderSide.SELL
+        limit_price = self._execution_limits.get(active_inst)
+        if limit_price is None or self._execution_sides.get(active_inst) != side:
+            execution = self._execution_side_and_limit(active_inst, delta, depth)
+            if execution is None:
+                return
+            side, limit_price = execution
+            self._execution_sides[active_inst] = side
+            self._execution_limits[active_inst] = limit_price
+
+        limit_value = limit_price.as_double()
+        if side == OrderSide.BUY and best_ask > limit_value:
+            return
+        if side == OrderSide.SELL and best_bid < limit_value:
+            return
+
         order = self.order_factory.limit(
             instrument_id=InstrumentId.from_str(active_inst),
             order_side=side,
-            quantity=Quantity.from_str(str(qty)),
-            price=Price.from_str(str(limit_price)),
-            time_in_force=TimeInForce.GTD,
-            expire_time=expire_dt,
+            quantity=Quantity.from_str(str(abs(delta))),
+            price=limit_price,
+            time_in_force=TimeInForce.IOC,
         )
         self.submit_order(order)
-        
-        if active_inst not in self._gtq_orders:
-            self._gtq_orders[active_inst] = {}
-        self._gtq_orders[active_inst][order.client_order_id.value] = {
-            "phase": 1, "order": order, "target_lots": target_lots
-        }
-
-    def _cancel_all_gtds(self, inst_str):
-        active_dict = self._gtq_orders.get(inst_str, {})
-        for cid, gtd in list(active_dict.items()):
-            order = gtd["order"]
-            if order.status in (OrderStatus.INITIALIZED, OrderStatus.ACCEPTED, OrderStatus.SUBMITTED, OrderStatus.PENDING_UPDATE):
-                try: self.cancel_order(order)
-                except Exception: pass
-        self._gtq_orders[inst_str] = {}
-
-    def _cancel_single_gtd(self, inst_str, client_order_id):
-        active_dict = self._gtq_orders.get(inst_str, {})
-        gtd = active_dict.pop(client_order_id, None)
-        if gtd:
-            order = gtd["order"]
-            if order.status in (OrderStatus.INITIALIZED, OrderStatus.ACCEPTED, OrderStatus.SUBMITTED, OrderStatus.PENDING_UPDATE):
-                try: self.cancel_order(order)
-                except Exception: pass
+        self._active_ioc_orders[active_inst] = order
+        self.log.info(
+            f"⚡ IOC TAKE {active_inst} target={target_lots} cur={current_lots} "
+            f"delta={delta} limit={limit_value:.8f}"
+        )
 
     def _get_current_lots(self, active_inst: str) -> int:
         positions = self.cache.positions_open(instrument_id=InstrumentId.from_str(active_inst))
@@ -837,6 +906,7 @@ class CommodityIntradayStrategy(Strategy):
         self._active_contract[prefix] = active_inst
 
         for inst_str in {previous_inst, active_inst} - {None}:
+            self._pause_aggressive_execution(inst_str)
             self._active_windows.pop(inst_str, None)
             self._slot_target_lots.pop(inst_str, None)
             self._slot_extreme_signals.pop(inst_str, None)
@@ -859,62 +929,9 @@ class CommodityIntradayStrategy(Strategy):
             if sig is not None: return sig
         return None
 
-    # ============================================================
-    # GTD 三阶段追价逻辑 (支持并发订单)
-    # ============================================================
-    def _check_gtq(self, inst_str, depth):
-        active_dict = self._gtq_orders.get(inst_str, {})
-        for cid, gtd in list(active_dict.items()):
-            if gtd["phase"] != 1: continue
-            order = gtd["order"]
-            
-            live_order = self.cache.order(order.client_order_id)
-            if not live_order or live_order.status not in (OrderStatus.INITIALIZED, OrderStatus.ACCEPTED, OrderStatus.SUBMITTED, OrderStatus.PENDING_UPDATE):
-                continue
-                
-            side, limit = order.side, order.price.as_double()
-            best_bid, best_ask, _ = _top_of_book(depth)
-            
-            if side == OrderSide.BUY and best_ask > 0 and best_ask <= limit: continue
-            if side == OrderSide.SELL and best_bid > 0 and best_bid >= limit: continue
-            
-            if side == OrderSide.BUY and best_bid > 0 and best_bid > limit:
-                self._upgrade_to_stage2(inst_str, cid, best_ask)
-            elif side == OrderSide.SELL and best_ask > 0 and best_ask < limit:
-                self._upgrade_to_stage2(inst_str, cid, best_bid)
-
-    def _upgrade_to_stage2(self, inst_str, cid, new_price):
-        active_dict = self._gtq_orders.get(inst_str, {})
-        gtd = active_dict.get(cid)
-        if not gtd or new_price <= 0: return
-        
-        old_order = gtd["order"]
-        target_lots = gtd["target_lots"]
-        self._cancel_single_gtd(inst_str, cid)
-        
-        live_order = self.cache.order(old_order.client_order_id)
-        if live_order:
-            rem_qty = live_order.quantity.as_double() - live_order.filled_qty.as_double()
-        else:
-            rem_qty = old_order.quantity.as_double()
-            
-        if rem_qty <= 0: return
-        
-        side = old_order.side
-        qty = Quantity.from_str(str(int(rem_qty)))
-        expire_dt = self.clock.utc_now() + timedelta(seconds=GTD_STAGE2_SEC)
-        
-        new_order = self.order_factory.limit(
-            instrument_id=InstrumentId.from_str(inst_str), order_side=side,
-            quantity=qty, price=Price.from_str(str(new_price)),
-            time_in_force=TimeInForce.GTD, expire_time=expire_dt,
-        )
-        self.submit_order(new_order)
-        active_dict[new_order.client_order_id.value] = {"phase": 2, "order": new_order, "target_lots": target_lots}
-
     def on_order_filled(self, event: OrderFilled) -> None:
         inst_str = str(event.instrument_id)
-        comm = getattr(event, "commission", None)            # 💡 新增
+        comm = getattr(event, "commission", None)
         if comm is not None:
             if isinstance(comm, (list, tuple)):
                 amt = sum(c.as_double() for c in comm)
@@ -922,61 +939,14 @@ class CommodityIntradayStrategy(Strategy):
                 amt = comm.as_double()
             self._commission_by_inst[inst_str] = \
                 self._commission_by_inst.get(inst_str, 0.0) + amt
-        cid = event.client_order_id.value
-        
+
         live_order = self.cache.order(event.client_order_id)
         if live_order and live_order.status == OrderStatus.FILLED:
-            active_dict = self._gtq_orders.get(inst_str, {})
-            active_dict.pop(cid, None)
-            
+            tracked = self._active_ioc_orders.get(inst_str)
+            if tracked is not None and tracked.client_order_id == event.client_order_id:
+                self._active_ioc_orders.pop(inst_str, None)
+
         self.log.info(f"✅ FILLED {inst_str} qty={event.last_qty.as_double()} px={event.last_px.as_double():.2f}")
-
-    def on_order_expired(self, event: OrderExpired) -> None:
-        inst_str = str(event.instrument_id)
-        cid = event.client_order_id.value
-        
-        active_dict = self._gtq_orders.get(inst_str, {})
-        gtd = active_dict.pop(cid, None)
-        if not gtd: return
-        
-        phase = gtd["phase"]
-        old_order = gtd["order"]
-        target_lots = gtd["target_lots"]
-
-        depth = self._latest_depth.get(inst_str)
-        if depth is None: return
-        best_bid, best_ask, _ = _top_of_book(depth)
-        if best_bid <= 0 or best_ask <= 0: return
-
-        live_order = self.cache.order(old_order.client_order_id)
-        if live_order:
-            rem_qty = live_order.quantity.as_double() - live_order.filled_qty.as_double()
-        else:
-            rem_qty = old_order.quantity.as_double()
-            
-        if rem_qty <= 0: return
-
-        side = old_order.side
-        qty = Quantity.from_str(str(int(rem_qty)))
-        new_price = best_ask if side == OrderSide.BUY else best_bid
-
-        if phase == 1:
-            expire_dt = self.clock.utc_now() + timedelta(seconds=GTD_STAGE2_SEC)
-            new_order = self.order_factory.limit(
-                instrument_id=InstrumentId.from_str(inst_str), order_side=side,
-                quantity=qty, price=Price.from_str(str(new_price)),
-                time_in_force=TimeInForce.GTD, expire_time=expire_dt,
-            )
-            self.submit_order(new_order)
-            active_dict[new_order.client_order_id.value] = {"phase": 2, "order": new_order, "target_lots": target_lots}
-        else:
-            new_order = self.order_factory.limit(
-                instrument_id=InstrumentId.from_str(inst_str), order_side=side,
-                quantity=qty, price=Price.from_str(str(new_price)),
-                time_in_force=TimeInForce.GTC,
-            )
-            self.submit_order(new_order)
-            active_dict[new_order.client_order_id.value] = {"phase": 3, "order": new_order, "target_lots": target_lots}
 
 
 # ---- 5c. 品种注册 + 策略构造 ----
@@ -1123,6 +1093,7 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame, start_date_str: str = No
                 # 每品种一份资金；交易所账户只获得其池内品种的资金份额。
                 starting_balances=[Money.from_str(f"{venue_start_equity:.2f} CNY")],
                 base_currency=Currency.from_str("CNY"), book_type=BookType.L2_MBP,
+                liquidity_consumption=True,
                 fee_model=UniversalFuturesFeeModel(cache=engine.cache, trading_day=trd_date),
             )
 
@@ -1150,7 +1121,7 @@ def run_nt_backtest_multi_day(signals_df: pd.DataFrame, start_date_str: str = No
             minute_idx, daily_active, all_inst_strs, mapping_type=MAPPING_TYPE,
             per_inst_capital=per_inst_capital,                # 💡 注入当日资金
             config=StrategyConfig(strategy_id=f"Strat-{trd_date}", order_id_tag="001",
-                                  oms_type=OmsType.NETTING, manage_gtd_expiry=True),
+                                  oms_type=OmsType.NETTING),
         )
         engine.add_strategy(strategy)
 
