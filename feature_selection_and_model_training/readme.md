@@ -80,9 +80,15 @@ flowchart LR
 
 ## 2. Feature Quality Is Multi-Dimensional / 因子质量不是一个数字
 
-### Linear association / 线性关联
+### Linear correlation with returns labels / 线性关联
 
-`full_ic` summarizes pooled Pearson association. `mean_period_ic` summarizes behavior across non-overlapping 2000-minute timestamp blocks. The former can be dominated by a regime or heavily represented instrument; the latter exposes instability but still inherits serial dependence from overlapping forward labels. / `full_ic` 概括混合样本中的 Pearson 线性关系，`mean_period_ic` 概括 2000 分钟不重叠时间块中的局部表现。前者可能被单一市场状态或高权重品种主导，后者可以暴露阶段不稳定，但仍继承重叠未来收益带来的序列依赖。
+**[EN]** Time aggregation and instrument scope are two separate dimensions. For each return label, the same diagnostics can be calculated both within each individual instrument and on a mixed-instrument pool. The individual-instrument results ask whether the mechanism works inside each market and reveal cross-instrument heterogeneity; the pooled results ask whether one normalized factor definition retains a common relationship with returns across the selected universe.
+
+`full_ic` is the Pearson correlation over the entire selected sample and measures the factor's overall linear association with the label. Period IC instead recalculates that relationship within consecutive, non-overlapping 2000-minute timestamp blocks. The resulting Period IC sequence—not its mean alone—is the object used to study temporal stability: `mean_period_ic` measures the average local relationship, while its dispersion, sign consistency, and Period ICIR (mean divided by standard deviation under one fixed convention) measure how repeatably that relationship appears across windows. A strong Full IC accompanied by a weak Mean Period IC or low Period ICIR suggests that the apparent effect is concentrated in a limited set of intervals; agreement in sign and magnitude together with a high Period ICIR is stronger evidence of persistence. Overlapping forward-return labels still reduce the effective number of independent observations, so these statistics are comparative research diagnostics rather than independent-trial significance claims.
+
+**[CN]** 时间汇总方式与品种统计范围是两个彼此独立的维度。对于每一个收益标签，同一组诊断既可以在每个单品种内部计算，也可以在混品种池上计算。单品种结果检验该机制能否在各个市场内部成立，并揭示品种间异质性；混品种结果则检验经过尺度处理的同一因子定义，能否在所选品种池中保持具有共性的收益关联。
+
+`full_ic` 是整个选定样本上的 Pearson 相关系数，用来概括因子与标签的全期总体线性关系。Period IC 则在连续且互不重叠的 2000 分钟时间块内重复计算这一关系。用于判断时间稳定性的对象应当是完整的 Period IC 序列，而不能只看它的均值：`mean_period_ic` 描述局部关系的平均水平，Period IC 的离散度、同号比例以及统一口径下的 Period ICIR（均值除以标准差）进一步衡量这种关系能否在不同窗口中稳定复现。Full IC 较强、但 Mean Period IC 较弱或 Period ICIR 较低，通常说明总体结果集中在少数阶段；方向与量级较一致且 Period ICIR 较高，才是时间持续性更强的证据。由于未来收益标签彼此重叠，这些统计量仍不能被解释成大量相互独立的下注，而应作为统一口径下的研究比较指标。
 
 ### Conditional shape / 条件响应形态
 
@@ -102,13 +108,9 @@ A high score on a small surviving subset may indicate a valuable conditional sig
 
 **[CN]** 使用 2024 收益确定因子方向，是样本内校准决定。只要方向在后续未触碰时期之前冻结，它并不构成相对于后续时期的前视；但在 2024 上选择方向后再汇报同一段 2024 收益，应明确标为“方向调整后的样本内结果”，而不是 OOS。
 
-### The first turnover observation / 第一笔换仓成本
-
-Setting the first `position.diff()` observation to zero means the evaluation assumes that the portfolio starts already holding the first recorded target—or that entry cost is outside the measurement window. It does **not** merely rename the origin of the turnover series. A conservative flat-start simulation would charge `abs(first_position - 0)`. Either convention can be used, but it must be stated because it affects short samples and high-conviction initial positions. / 把第一笔 `position.diff()` 强制设为零，意味着评测假设组合在统计开始前已经持有第一笔目标仓位，或者首次建仓成本位于评价窗口之外；这并不只是“把换手率起点改成 0”。更保守的空仓起步口径会收取 `abs(first_position - 0)`。两种约定都可以使用，但必须写清楚，因为它会影响短样本和初始高仓位结果。
-
 ### Cost model limits / 费用模型边界
 
-The vectorized backtest is a research diagnostic. A scalar fee rate cannot reproduce open/close, close-yesterday/close-today, exchange rebates, minimum fees, queue position, market impact, or contract-specific tick liquidity. These belong to the event-driven simulation. The diagnostic is useful for ranking under one convention, not for claiming executable PnL. / 向量化回测是研究诊断。单一费率无法复现开仓/平仓、平昨/平今、交易所返还、最低收费、排队位置、市场冲击与合约特定 Tick 流动性；这些应由事件驱动仿真处理。该诊断适合在统一口径下排序，而不是声称可执行净收益。
+The vectorized backtest is a research diagnostic. A scalar fee rate cannot reproduce open/close, close-yesterday/close-today, exchange rebates, minimum fees, market impact, or contract-specific tick liquidity. These belong to the event-driven simulation. The diagnostic is useful for ranking under one convention, not for claiming executable PnL. / 向量化回测是研究诊断。单一费率无法复现开仓/平仓、平昨/平今、交易所返还、最低收费、市场冲击与合约特定 Tick 流动性；这些应由事件驱动仿真处理。该诊断适合在统一口径下排序，而不是声称可执行净收益。
 
 ## 4. Graph-Based Redundancy Reduction / 基于图网络的冗余压缩
 
