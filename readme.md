@@ -33,7 +33,7 @@
 
 ---
 
-### 🛡️ Interpretability, LLM Harnessing & Human-in-the-Loop / 可解释性、计算沙盒约束与人在回路
+### 🛡️ Interpretability, LLM Harnessing & Human-in-the-Loop / 可解释性、计算沙盒约束与人在系统中的作用
 
 **[EN]**
 1. **Interpretability as a First-Class Constraint**: The system fundamentally values the economic and microstructure interpretability of mined signals over brute-force statistical fits. Every factor must answer who loses, why inefficiency exists, and why it persists.
