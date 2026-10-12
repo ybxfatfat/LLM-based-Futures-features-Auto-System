@@ -1,4 +1,4 @@
-# 🧬 LLM-GA & High-Frequency Futures Alpha Engine / 大模型高频微观因子挖掘与计算系统
+# 🧬 期货日内高频可解释特征挖掘LLM系统 / Interpretable High-Frequency Futures Feature Mining LLM System
 
 **[EN]** This project is a high/mid-frequency quantitative feature mining and execution pipeline that processes raw snapshot data into trading signals ready for simulated backtesting. The system features a **dual-phase, dual-engine architecture**: the bottom layer combines a C++ symbolic-tracing engine with a RAG-assisted workflow to design snapshot aggregation logic and transform 500 ms data into microstructure base fields; the upper layer uses a GPU DAG engine and a multi-round, 5-layer LLM workflow to generate and evaluate minute-level Alpha candidates. The remaining stages cover community-based feature redundancy reduction for selected instrument pools, feature-evaluation dashboards, tree-model signal generation and target-position mapping, and NautilusTrader simulation.
 
@@ -16,6 +16,99 @@
 > 🧭 **Core Research Thesis / 核心研究主张**
 > * **[EN]** The LLM in this system is not treated as an autonomous black-box formula generator. It is positioned as an **interpretable hypothesis generator operating inside an auditable research loop**: economic intuition precedes code, transformations remain symbolic, and every candidate can be traced, challenged, decomposed, and rejected. Reviews of prior experimental outputs showed that this constrained process generally produced factors with coherent microstructure logic rather than arbitrary mathematical nesting.
 > * **[CN]** 本系统并不把 LLM 当作自主运转的黑盒公式生成器，而是将其定位为**可审计研究闭环中的可解释假设生成器**：经济与微观结构逻辑先于代码，各步变换保持为符号公式，每个候选都可被追溯、质疑、拆解与否决。对早期实验产出的复盘也表明，这种受约束的生成过程通常能保留较清晰的微观交易逻辑，而不是制造任意的数学嵌套。
+
+---
+
+## 🗺️ System Architecture & Pipeline Overview / 全流程架构与核心要点概览
+
+**[EN]** This project is an end-to-end quantitative research and execution pipeline powered by an **interpretable Large Language Model (LLM) mining core**, spanning from raw 500 ms Level-2 snapshots to minute-level factor evolution, graph-based orthogonal selection, and event-driven backtesting. The architecture establishes a **dual-stage, progressive LLM mining engine**:
+* **Phase 1 (Snapshot-Level LLM Microstructure Mining)**: Far from a naive downsampling step, this stage empowers the LLM to invent entirely new, profitable minute-frequency base fields (`Base Fields`). Guided by strict microstructure economic intuition prompts ("Economic 3-Questions"), the LLM formulates arbitrary snapshot aggregation logic and stateful machines as reviewable Python classes (`BaseTickFeature`), executed natively by a C++ symbolic tracing engine. *(Note: Quote-constrained `BuyRatio` and streak volume are merely representative output examples, not the mechanism itself.)*
+* **Phase 2 (Minute-Level LLM-GA Alpha & Regime Evolution)**: Taking Phase 1 base fields as ingredients, the LLM acts as an interpretable hypothesis generator and diagnostic expert across a 5-layer scaffolded evolutionary pipeline (L1 Genesis $\to$ L2 Relativization $\to$ L3 Distribution & Monotonicity Diagnosis $\to$ L4 Temporal Compound Operators $\to$ L5 Smoothing & Sweeping), discovering high-conviction "Strong Features" (Factors) and market regimes (Regimes) executed on a GPU VRAM-resident DAG engine.
+* **Phases 3–5 (Selection, Evaluation, and Execution)**: Downstream modules perform correlation graph community clustering and hierarchical voting to remove collinearity, high-resolution multi-metric profiling and Streamlit dashboard review, LightGBM modeling, 2×2 target position mapping, and high-fidelity NautilusTrader L2 event-driven simulation.
+
+**[CN]** 本项目是一套以 **LLM（大语言模型）可解释挖掘为核心动力**、覆盖从**原始 500ms Level-2 高频快照**到**分钟级高阶特征演化**、再到**图网络正交筛选**与**事件驱动仿真**的端到端量化研究流水线。系统在 **Phase 1 与 Phase 2 构建了双层递进的 LLM 可解释挖掘核心**：
+* **Phase 1（快照级 LLM 可解释微观特征挖掘）**：绝非简单的机械降频重采样，其核心是通过微观博弈“灵魂三问”施加硬约束，赋能 LLM 以 **Python Class（继承 `BaseTickFeature`）** 形式自由定义任意复杂的 500ms 快照聚合规则与状态机，经 C++ 符号追踪引擎转化为底层原生高速执行，**主动挖掘各种具有 profitable 信号的全新分钟频微观基础字段（Base Fields）**；（注：盘口约束成交归因 `BuyRatio`、连续游程等仅是挖掘产出的典型示例，绝非机制本身）。
+* **Phase 2（分钟频 LLM 分层遗传演化挖掘 / LLM-GA）**：承接 Phase 1 基础字段，由 LLM 作为假设生成器与诊断专家，在 **5 层定向脚手架演化流水线（L1 原料原创 ➔ L2 尺度相对化 ➔ L3 分布与单调性诊断 ➔ L4 复合时序交互 ➔ L5 降噪与窗口扫描）** 与 **GPU 常驻显存 DAG 编译底座**协同下，定向搜索可供树模型直接吸收的**高阶强特征（Factors）与市场环境状态（Regimes）**。
+* **Phase 3 ~ Phase 5（筛选、评价与落地）**：对挖掘产出的特征池进行**网络拓扑社区正交初筛**、**多进程多维度全景体检与交互看板**、以及**树模型预测 ➔ 2×2 仓位映射 ➔ NautilusTrader L2 事件驱动拟真撮合**，实现研究到实盘的严格闭环。
+
+---
+
+### 🛡️ Interpretability, LLM Harnessing & Human-in-the-Loop / 可解释性、计算沙盒约束与人在回路
+
+**[EN]**
+1. **Interpretability as a First-Class Constraint**: The system fundamentally values the economic and microstructure interpretability of mined signals over brute-force statistical fits. Every factor must answer who loses, why inefficiency exists, and why it persists.
+2. **Execution Harnesses Against LLM Limitations**: Expecting an LLM to generate raw, end-to-end execution code from scratch invites severe bugs, excessive complexity, and fatal look-ahead bias (future information leakage). To eliminate this risk, the system provides **strict, purpose-built execution harnesses** at every stage: the LLM is restricted to authoring declarative Python computational graph classes (`BaseTickFeature`) in Phase 1 or compact formula strings in Phase 2. All built-in operators physically guarantee **temporal causality and zero future-leakage**, drastically slashing the proportion of unexecutable "bad points" and guaranteeing execution safety.
+3. **Human-in-the-Loop & Creativity Scaffolding**: LLMs inherently lack spontaneous creativity and tend to converge to naive, repeated combinations when unguided. The system introduces rigorous human-in-the-loop mechanisms to catalyze innovation:
+   * **Exemplars & Textual Inspiration Cards**: Researchers actively curate paradigm templates for stochastic prompt sampling to inspire analogical reasoning, as well as code-free textual intuition cards (describing market inefficiencies, counterparty weaknesses, and raw pattern metrics) as creative springboards;
+   * **Dynamic Empirical Metrics Feedback**: The scaffolded multi-layer pipeline feeds empirical diagnostics (10-quantile return profiles, Period IC, distribution shapes, turnover) back into the prompt in real time;
+   * **Step-by-Step Reflective Reasoning**: The LLM is guided to inspect the feature's physical intuition, distributional properties, and return dynamics layer-by-layer, prompting deep reflection to synthesize genuinely novel, structurally rich, and effective features.
+
+**[CN]**
+1. **可解释性硬约束为第一原则**：系统高度重视因子的微观经济学博弈机制与物理可解释性，拒绝无实质经济意义的纯数学暴力拟合，每一个特征都必须能够清晰追溯其经济逻辑来源。
+2. **严苛计算沙盒克服 LLM 局限性与防前视泄露**：直接让 LLM 编写端到端计算代码极易产生逻辑冗余、语法报错甚至致命的未来信息泄露（Look-ahead Bias）。为此，系统在每个阶段都提供了**严苛的高效执行沙盒（Harness 约束系统）**：LLM 仅需编写声明式 Python 类计算图（Phase 1）或字符串公式（Phase 2）。底座所有内置算子均在物理架构上**严格保证因果时序单向性与零未来信息泄露**，极大地压降了不可执行或产生前视偏差的“坏特征/坏点”比例。
+3. **人在回路（Human-in-the-Loop）与多层启发式创新脚手架**：LLM 本身缺乏主动创新能力，缺少引导极易陷入对已有经验的平庸重组。系统通过多重人机协同机制激发真正的受控创新：
+   * **范例库与纯文字灵感卡片注入**：研究员主动维护范例构造库供随机抽样注入 Prompt 供模型类比模仿，或提供不含代码的纯文字市场行为机理、对手盘弱点及原始特征模式的数值指标描述，作为创新的灵感触发器；
+   * **即时定量实证指标回传**：多层流水线在每一步动态将 10 分组收益剖面图、Period IC、分布形态与换手等实证指标注入 Prompt；
+   * **逐层反思与深度推演**：引导 LLM 联合特征背后的物理逻辑与其经验分布、收益单调性进行因果归因与反思迭代，最终打破局部最优，产出高信噪比、相对复杂且真正新颖的有效特征。
+
+```mermaid
+flowchart TD
+    subgraph P1["🔬 Phase 1: Snapshot-Level LLM Microstructure Mining / 快照级 LLM 可解释微观特征挖掘 (500ms ➔ 1-Min)"]
+        direction TB
+        LLM1["🧠 Phase 1 LLM Research Agent / LLM 挖掘智能体<br/>• Economic 3-Questions: What drives returns? Who loses? Why persist?<br/>  微观博弈『灵魂三问』: 赚谁的钱 / 对手盘为何亏损 / 异象为何持续<br/>• Arbitrary Class-based rules: Python classes defining 500ms aggregation & stateful logic<br/>  以 Class 形式自由定义任意复杂的快照聚合与状态机逻辑<br/>• Dual-payload RAG + AST static syntax guard + Post-mortem reflection loop<br/>  双载荷 RAG 经验库 + AST 语法沙盒 + 验尸官反思闭环"]
+        CPP["⚙️ C++ Symbolic Tracing Engine / C++ 符号追踪引擎 (tick_engine)<br/>• PyBind11 contiguous NumPy buffers ➔ Native C++ row loop (zero Python overhead)<br/>  PyBind11 连续缓冲区 ➔ 原生 C++ 循环 (免 Python 调度开销)<br/>• Declarative DAG (ce.IfElse, ce.ConstNode) + O(1) stateful operators (moments/extrema/quantiles/TsResetable runs)<br/>  声明式计算图 + O(1) 滑动矩/单调队列极值/红黑树分位数/游程包装器"]
+        LLM1 -->|"Auto-generate & human-review BaseTickFeature classes<br/>生成并审查 BaseTickFeature 类"| CPP
+        RAW["Raw 500ms L2 snapshot stream<br/>原始 500ms L2 快照流 (5档挂单/累计量额差分)"] --> CPP
+        CPP --> MINED_BASE["🎯 Mined Base Fields / 挖掘产出的分钟频微观基础字段<br/>(Examples: quote-constrained BuyRatio, streak volume Streak_Max_Volume, etc.)<br/>(典型示例：盘口约束 BuyRatio、连续买卖游程等基础字段)"]
+        MINED_BASE --> BASE_PANEL["PyArrow Column-wise Alignment ➔ Base Panel<br/>PyArrow 智能列对齐补丁 ➔ 基础面板宽表"]
+    end
+
+    subgraph P2["🚀 Phase 2: Minute-Level LLM-GA Alpha Evolution / 分钟频 LLM 分层遗传演化系统 (1-Min ➔ Deep Alpha)"]
+        direction TB
+        LLM2["🧬 Phase 2 LLM-GA Evolutionary Network / 5层定向遗传演化网络<br/>• 5-Layer mutation: L1 Genesis & raw origination ➔ L2 Relativization ➔ L3 Monotonicity diagnosis ➔ L4 Temporal compound ➔ L5 Smoothing & sweeping<br/>  5层定向突变: L1原料原创 ➔ L2尺度相对化 ➔ L3单调性诊断 ➔ L4时序复合 ➔ L5平滑扫描<br/>• Scaffolding: Inter-layer reservoir E&E sampling + Lessons Learned DB + AST Lineage Root Formulas<br/>  蓄水池 E&E 抽样 + Lessons Learned 错题本 + AST 血缘 Root Formula<br/>• Market regime mining: state_miner reverse-engineers microstructure states from win/loss samples<br/>  逆向市场环境挖掘: state_miner 从盈亏样本反推微观状态"]
+        GPU["⚡ GPU VRAM-Resident DAG Compiler / GPU 常驻显存编译底座 (minute_gpu_calculation)<br/>• AST expansion + Common Subexpression Elimination (CSE) + Formula Chunking<br/>  AST 宏展开 + 公共子表达式消除 (CSE) + 显存驻留 Formula Chunking<br/>• Contract-local compute + Late main-contract routing (prevents rollover jump shocks)<br/>  逐合约原生计算 + Late Masking 延迟主力路由 (防换月跳空)"]
+        BASE_PANEL --> GPU
+        LLM2 <--> GPU
+        GPU --> POOL["🎯 Mined Factors & Regimes / 高阶强特征与市场状态池"]
+    end
+
+    subgraph P3["🕸️ Phase 3: Graph-Based Selection / 基于图网络的特征正交与初筛"]
+        direction TB
+        NET["Correlation Graph / 特征共线性网络<br/>(Pearson correlation matrix to network / 相关矩阵建图)"] --> COMM["Greedy Modularity Community Discovery<br/>贪心模块度社区聚类"]
+        COMM --> VOTE["Hierarchical Voting Mechanism / 分层民主投票<br/>Single-inst preselection ➔ 20% Pool coverage retention ➔ Pooled IC tie-break<br/>单品种代表 ➔ 20% 全池覆盖率 ➔ 混池 IC 决胜"]
+        VOTE --> MASK["Tradability Masking / 可交易样本屏蔽<br/>(Exclude EOD, illiquid night, rollover / 过滤尾盘/冷门夜盘/换月)"]
+        MASK --> ORTH["Orthogonal Feature Subset / 正交代表特征子集"]
+    end
+
+    subgraph P4["🔍 Phase 4: High-Resolution Evaluation / 高分辨率特征评价与看板"]
+        direction TB
+        EVAL["Multiprocessed Evaluation Matrix / 多进程全景体检矩阵<br/>• Non-overlapping 2000-min Period IC / ICIR / sign win-rate<br/>  2000分钟不重叠 Period IC / ICIR / 胜率<br/>• 10-Quantile profile (Q10 - Q1 spread) / 10分组多空利差<br/>• Vectorized simulation (annual bps / Sharpe / turnover)"]
+        SPLIT["Strict Sample Role Partitioning / 严格样本角色界定<br/>• 2024 IS selection & direction calibration / 样本内筛选与方向校准<br/>• Frozen rules & untouched OOS testing / 规则冻结与独立 OOS 验证"]
+        DASH["AlphaMiner Pro Dashboard / 交互式看板<br/>• Feature-Centric drilldown (distribution shifts)<br/>• Scope-Centric rankings (threshold filtering)"]
+        EVAL --- SPLIT --- DASH
+    end
+
+    subgraph P5["📈 Phase 5: Position Mapping & Execution / 仓位映射与事件驱动仿真"]
+        direction TB
+        TREE["LightGBM Tree Models / 树模型预测<br/>(Time-ordered splits + Embargo to prevent leakage / 有序时间戳 + Embargo 防前视)"] --> MAP["2×2 Position Mapping Logic / 2×2 核心仓位映射架构<br/>• Timeframe: Rolling window vs. IS Static anchoring / 滚动窗口 vs 样本内静态冻结<br/>• Scaling: Z-Score (Demean / No-Demean) vs. Robust Quantile/IQR lock<br/>  Z-Score 缩放 vs 稳健极值/分位数锁定"]
+        MAP --> SIM["NautilusTrader Event-Driven Engine / 事件驱动引擎<br/>(Nanosecond CST alignment / L2_MBP depth replay / liquidity_consumption=True<br/>纳秒级时间对齐 / L2 五档盘口重放 / 可见流动性逐档消耗)"]
+        SIM --> EXEC["Divergent Execution Policies / 双资产差异化执行<br/>• Index: 3-stage limit repricing (passive GTD ➔ marketable GTD ➔ GTC remainder)<br/>  股指: 3 阶段限价追价 (被动挂单 ➔ 对手价追价 ➔ GTC)<br/>• Commodity: Anchored opposite price band ➔ 500ms repeated Limit IOC delta taking<br/>  商品: 锚定对手价价格带 ➔ 逐 500ms 提交 Limit IOC 差额吃单<br/>• Real constraints: lot discretization (max_lots), margin, close-today/yesterday fee, 14:30 flat<br/>  手数离散化 / 保证金与平今平昨费率 / 14:30 强平"]
+    end
+
+    POOL --> NET
+    ORTH --> EVAL
+    ORTH --> TREE
+```
+
+### 📋 五大阶段核心要点速查 (Phase-by-Phase Highlights)
+
+| 阶段 (Phase) | 核心定位与 LLM 挖掘使命 (Mission & LLM Role) | 计算引擎与底座技术 (Engine & Architecture) | 核心挖掘机制与微观要点 (Core Mechanism) | 严谨约束与数据治理 (Governance & Safeguards) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Phase 1: 快照级微观特征挖掘**<br/>**Snapshot Microstructure Mining**<br/>(500ms ➔ 1-Min) | **[EN]** Snapshot-level interpretable base field mining: actively mines profitable minute-frequency base fields (`Base Fields`) using LLM.<br/>**[CN]** 快照级 LLM 可解释基础特征挖掘：赋能 LLM 挖掘具备 profitable 信号的分钟频全新微观基础字段 (`Base Fields`)。 | **[EN]** C++ Symbolic Tracing Engine (`tick_engine`): PyBind11 contiguous NumPy buffers; native row loop (zero Python overhead); declarative DAG (`ce.IfElse`, `ce.ConstNode`); $O(1)$ moments, monotonic deques, red-black tree quantiles, `TsResetable` runs.<br/>**[CN]** C++ 符号追踪引擎 (`tick_engine`)：PyBind11 连续 NumPy 缓冲区零调度循环；声明式 DAG (`ce.IfElse`, `ce.ConstNode`)；内置 $O(1)$ 高阶矩/单调队列极值/红黑树分位数/`TsResetable` 游程包装器。 | **[EN]** • **Prompt Economic 3-Questions**: Must answer in `hypothesis`: ① What drives returns? ② Who is the loser? ③ Why does it persist?<br/>• **Arbitrary Class-Based Rules**: LLMs freely define 500ms aggregation & stateful machines as `BaseTickFeature` subclasses.<br/>• **Output Examples (Not Mechanism Itself)**: Quote-constrained volume attribution (`BuyRatio`) and streak volume (`Streak_Max_Volume`) are merely representative outputs.<br/>**[CN]** • **LLM 提示词『灵魂三问』硬约束**：写代码前必须在 `hypothesis` 中回答：① **赚谁的钱**；② **对手盘为何亏损**；③ **异象为何持续**；<br/>• **以 Class 形式自由构造快照聚合规则**：允许以 Python 类 (`BaseTickFeature` 子类) 自由构造任意复杂的 500ms 快照聚合计算逻辑与状态机；<br/>• **典型产出示例 (非机制本身)**：盘口约束成交量归因 (`BuyRatio`)、连续买卖游程 (`Streak_Max_Volume`) 等仅为挖掘产出的代表性基础字段示例。 | **[EN]** Dual-payload RAG (economic embedding + code/metric metadata); Human review gate & AST safety sandbox; Post-mortem reflection loop; `tick_count > 20` valid threshold mask; Zero-division guards; Frozen market pauses; `auto_clear` state lifetimes; PyArrow column patching.<br/>**[CN]** 双载荷 RAG 知识库（机理 Embedding 检索，代码与指标存为元数据防语法噪声）；人机协同审查（AST 静态安全审查，需人工显式注册方可加载，验尸官评估反思回写错题本）；有效快照阈值 (`tick_count > 20`) 屏蔽稀疏/开盘畸变；动态防零除；休市冻结市场时间；`auto_clear` 区分分钟桶与合约历史；PyArrow 智能补列。 |
+| **Phase 2: 分钟频高阶演化挖掘**<br/>**Minute-Level Alpha Evolution**<br/>(1-Min ➔ Deep Alpha) | **[EN]** Minute-level LLM-GA evolutionary factor & regime miner: searches for "Strong Features" (Factors) and market regimes (Regimes) for tree models.<br/>**[CN]** 分钟频 LLM 分层遗传演化系统 (LLM-GA)：承接 Base Panel，利用 LLM 作为诊断专家定向演化供树模型直接吸收的高阶强特征 (Factors) 与市场状态 (Regimes)。 | **[EN]** GPU VRAM-Resident DAG Compiler (`minute_gpu_calculation`): AST `NodeTransformer` macro expansion; Common Subexpression Elimination (CSE); Data-Stationary Formula Chunking; `out_degree` memory release; Late main-contract routing.<br/>**[CN]** GPU 常驻显存编译底座 (`minute_gpu_calculation`)：AST `NodeTransformer` 解析与宏展开；公共子表达式消除 (CSE)；显存驻留 Formula Chunking 减少 PCIe 搬运；`out_degree` 拓扑内存释放；Late Masking 延迟主力路由。 | **[EN]** • **5-Layer Scaffolded Pipeline**: L1 Genesis (exemplar analogy + 50% raw origination) $\to$ L2 Relativization (dimensionless scaling) $\to$ L3 Distribution & Monotonicity diagnosis (10-quantile profiling + explicit transforms) $\to$ L4 Temporal Interaction (Compound operators with recursion caps) $\to$ L5 Smoothing & Sweeping (exponential smoothing + 5–8 window families).<br/>• **Evolutionary Infrastructure**: Reservoir E&E sampling (exploitation vs. dormant exploration); Lessons Learned DB; AST lineage Root Formulas; `state_miner.py` regime discovery from trade samples.<br/>**[CN]** • **5 层定向脚手架突变架构**：L1 原料原创 (强制 50% 摆脱模板依赖) ➔ L2 尺度相对化 ➔ L3 分布与单调性诊断 (10 分组图与机制联合归因并显式变换) ➔ L4 复合时序交互 (Compound 算子嵌套，Prompt 限制深度) ➔ L5 降噪与 5~8 组周期网格扫描；<br/>• **演化基础设施与记忆生态**：分层蓄水池 E&E 抽样 (新生代 Exploitation 纵深打磨 vs 沉睡基因 Exploration 唤醒防收敛)；Lessons Learned 经验库；AST 血缘图谱提取 Root Formulas；微观状态挖掘器 (`state_miner.py`，从盈亏样本反推微观环境)。 | **[EN]** Strictly causal operators (no forward-looking operators in feature prompts); Caps on nesting depth to avoid overfitting; Contract-local execution with late routing to avoid rollover jump contamination.<br/>**[CN]** 全流程保留经济学解释硬约束；因果时序单向保证（严禁未来算子）；公式复杂度与嵌套深度严格封顶以防过拟合；逐合约原生计算 + 导出期延迟主力路由（避免换月拼接带来的虚假跳空）。 |
+| **Phase 3: 图网络特征正交与初筛**<br/>**Graph-Based Feature Selection** | **[EN]** Correlation network redundancy reduction & representative extraction before ML models.<br/>**[CN]** 进入树模型前利用网络图论与民主化分层投票机制对海量候选去冗余，提取正交代表特征。 | **[EN]** Pearson correlation matrix to graph; Greedy Modularity community clustering algorithm.<br/>**[CN]** Pearson 全局相关矩阵建图；Greedy Modularity 贪心模块度聚类算法划分共线性社区。 | **[EN]** Hierarchical Voting: ① Single-instrument historical preselection; ② 20% pool coverage threshold to eliminate narrow niches; ③ Instrument-level votes with pooled IC tie-breaking.<br/>**[CN]** 分层民主投票机制：① 单品种内历史指标预选代表；② 全池覆盖率阈值 (如 20%) 淘汰非通用社区；③ 社区内品种级选票汇总，平票时按 Pooled IC 决胜。 | **[EN]** Tradability Masking: excludes EOD, illiquid night sessions, and rollover periods from pooled calculations.<br/>**[CN]** 可交易样本屏蔽 (Tradability Mask)：排除日内尾盘、低流动性夜盘及换月时段，规避非目标交易时段对因子的虚假支撑与相关性失真。 |
+| **Phase 4: 高分辨率特征评价与看板**<br/>**Evaluation & Dashboard** | **[EN]** Multiprocessed diagnostic matrix & interactive visual inspection for researcher review.<br/>**[CN]** 向量化全景体检矩阵与多维度交互式可视化审查。 | **[EN]** Multiprocessed diagnostic engine (`feature_quality.py`) + Streamlit application (`AlphaMiner Pro` / `dashboard_app.py`).<br/>**[CN]** 多进程向量化评测引擎 (`feature_quality.py`) + Streamlit 交互式大屏看板 (`AlphaMiner Pro` / `dashboard_app.py`)。 | **[EN]** Multi-metric evaluation: 2000-min non-overlapping Period IC, Mean Period IC, Period ICIR (temporal stability); 10-quantile return profiles (Q10 - Q1 spread); Vectorized simulation bps/Sharpe/turnover; Coverage and missingness breakdowns.<br/>**[CN]** 全景评价指标：2000 分钟不重叠窗口 Period IC、Mean Period IC、Period ICIR (时序持续性)；10 分组多空收益利差 (Q10 - Q1) 与单调性；NumPy 向量化年化收益 bps/夏普/换手率；覆盖率与缺失率细分。 | **[EN]** Strict sample role separation: 2024 is strictly in-sample research/selection (sign calibration, threshold tuning); untouched post-2024 period reserved for true OOS.<br/>**[CN]** 样本角色严格隔离：2024 年严格作为样本内研究与筛选期（方向校准与阈值调优）；保留独立未触碰的 OOS 时期；看板提供 Feature-Centric 单因子下钻与 Scope-Centric 全池横向排行榜。 |
+| **Phase 5: 仓位映射与仿真回测**<br/>**Mapping & Execution Simulation** | **[EN]** Tree-based prediction, mapping raw return forecasts to target positions, and realistic execution simulation.<br/>**[CN]** 树模型信号预测、预期收益率向目标仓位科学映射及高真实度拟真回测。 | **[EN]** LightGBM regression models (`tree_models.py`) + NautilusTrader event-driven backtesting engine (`run_backtest`) with `L2_MBP` depth replay.<br/>**[CN]** LightGBM 树模型 (`tree_models.py`) + NautilusTrader 事件驱动引擎 (`run_backtest`)：纳秒级时间对齐、`L2_MBP` 五档盘口重放、`liquidity_consumption=True` 真实逐档消耗。 | **[EN]** • **2×2 Position Mapping**: Timeframe (trailing rolling window vs. IS static anchor) $\times$ Scaling (Z-Score with Demean/No-Demean vs. Robust Quantile/IQR lock).<br/>• **Divergent Asset Execution**: Index (30-min grid, 3-stage limit repricing: 45s GTD passive $\to$ 45s GTD marketable $\to$ GTC) vs. Commodity (anchored opposite quote, 500ms repeated Limit IOC delta taking).<br/>**[CN]** • **2×2 仓位映射逻辑**：时间基准 (实时滚动窗口 vs 样本内静态冻结) $\times$ 数值缩放 (Z-Score 减均值/不减均值 vs 稳健极值/分位数锁定)；<br/>• **双资产差异化执行**：股指 (30 分钟网格，3 阶段限价追价) vs 商品 (日度独立沙盒，锚定对手价价格带，逐 500ms 提交 Limit IOC 针对目标差额吃单)。 | **[EN]** Lot discretization (`max_lots`); Exchange-specific margin and open/close/close-today tiered fees; 14:30 forced flat & pre-holiday night closing flat.<br/>**[CN]** 手数离散化 (`max_lots`)；保证金与平今平昨费率；14:30 午后强平及节假日前夜盘强平；基于唯一时间戳与 Embargo 物理切分训练/验证集。 |
 
 ---
 
