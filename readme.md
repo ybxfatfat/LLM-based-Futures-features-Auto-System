@@ -51,6 +51,9 @@
    * **即时定量实证指标回传**：多层流水线在每一步动态将 10 分组收益剖面图、Period IC、分布形态与换手等实证指标注入 Prompt；
    * **逐层反思与深度推演**：引导 LLM 联合特征背后的物理逻辑与其经验分布、收益单调性进行因果归因与反思迭代，最终打破局部最优，产出高信噪比、相对复杂且真正新颖的有效特征。
 
+<details>
+<summary><b>📊 Click to expand End-to-End Pipeline Flowchart / 点击展开全流程架构流程图</b></summary>
+
 ```mermaid
 flowchart TD
     subgraph P1["🔬 Phase 1: Snapshot-Level LLM Microstructure Mining / 快照级 LLM 可解释微观特征挖掘 (500ms ➔ 1-Min)"]
@@ -99,6 +102,8 @@ flowchart TD
     ORTH --> EVAL
     ORTH --> TREE
 ```
+
+</details>
 
 ### 📋 五大阶段核心要点速查 (Phase-by-Phase Highlights)
 
